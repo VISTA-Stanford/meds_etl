@@ -30,6 +30,8 @@ CUSTOMER_CONCEPT_ID_START: int = 2_000_000_000
 DEFAULT_VISIT_CONCEPT_ID: int = 8
 DEFAULT_NOTE_CONCEPT_ID: int = 46235038
 DEFAULT_VISIT_DETAIL_CONCEPT_ID: int = 4203722
+DEFAULT_IMAGE_CONCEPT_ID: int = 4180938
+
 
 OMOP_TIME_FORMATS: Iterable[str] = ("%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%d")
 
@@ -188,13 +190,23 @@ def write_event_data(
                 table_name + "_start_date",
                 table_name + "_datetime",
                 table_name + "_date",
+                # HACK -- last chance is to search for occurence in the column name
+                table_name + "_occurrence_datetime",
+                table_name + "_occurrence_date",
             ]
             options = [
                 cast_to_datetime(schema, option, move_to_end_of_day=True)
                 for option in options
                 if option in schema.names()
             ]
-            assert len(options) > 0, f"Could not find the time column {schema.names()}"
+            # assert len(options) > 0, f"Could not find the time column {schema.names()}"
+            if not options:
+                raise ValueError(
+                    f"Could not find a valid time column for table '{table_name}'. "
+                    f"Expected one of: {table_details.get('time_field_options', []) + [f'{table_name}_start_datetime', f'{table_name}_start_date', f'{table_name}_datetime', f'{table_name}_date']} "
+                    f"but found only these schema columns: {schema.names()}"
+                )
+
             time = pl.coalesce(options)
 
         # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -287,24 +299,49 @@ def write_event_data(
         if "visit_occurrence_id" in schema.names():
             metadata["visit_id"] = pl.col("visit_occurrence_id")
 
+        if "care_site_id" in schema.names():
+            metadata["care_site_id"] = pl.col("care_site_id")
+
         unit_columns = []
         if "unit_source_value" in schema.names():
             unit_columns.append(pl.col("unit_source_value"))
+
         if "unit_concept_id" in schema.names():
             unit_columns.append(
-                pl.col("unit_concept_id").replace_strict(concept_id_map, return_dtype=pl.Utf8(), default=None))
+                pl.col("unit_concept_id").replace_strict(concept_id_map, return_dtype=pl.Utf8(), default=None)
+            )
         if unit_columns:
             metadata["unit"] = pl.coalesce(unit_columns)
 
         if "load_table_id" in schema.names():
             metadata["clarity_table"] = pl.col("load_table_id")
 
-        if "note_id" in schema.names():
-            metadata["note_id"] = pl.col("note_id")
-
         if (table_name + "_end_datetime") in schema.names():
             end = cast_to_datetime(schema, table_name + "_end_datetime", move_to_end_of_day=True)
             metadata["end"] = end
+
+        # unclear if these are needed
+        # ---------------------------
+        if "provider_id" in schema.names():
+            metadata["provider_id"] = pl.col("provider_id")
+
+        if "note_id" in schema.names():
+            metadata["note_id"] = pl.col("note_id")
+
+        if "procedure_occurrence_id" in schema.names():
+            metadata["procedure_occurrence_id"] = pl.col("procedure_occurrence_id")
+
+        if "image_occurrence_id" in schema.names():
+            metadata["image_occurrence_id"] = pl.col("image_occurrence_id")
+            metadata["image_series_uid"] = pl.col("image_series_uid")
+            metadata["image_study_uid"] = pl.col("image_study_uid")
+            metadata["_accession_number"] = pl.col("_accession_number")
+            metadata["local_path"] = pl.col("local_path")
+            metadata["wadors_uri"] = pl.col("wadors_uri")
+            metadata["anatomic_site_source_value"] = pl.col("anatomic_site_source_value")
+            metadata["modality_source_value"] = pl.col("modality_source_value")
+            metadata["procedure_occurrence_id"] = pl.col("procedure_occurrence_id")
+        # ---------------------------
 
         batch = batch.filter(code.is_not_null())
 
@@ -456,9 +493,12 @@ def extract_metadata(path_to_src_omop_dir: str, path_to_decompressed_dir: str, v
     # and use it to generate metadata file as well as populate maps
     # from (concept ID -> concept code) and (concept ID -> concept name)
     print("Generating metadata from OMOP `concept` table")
-    for concept_file in tqdm(itertools.chain(*get_table_files(path_to_src_omop_dir, "concept")),
-                             total=len(get_table_files(path_to_src_omop_dir, "concept")[0]) + len(get_table_files(path_to_src_omop_dir, "concept")[1]),
-                             desc="Generating metadata from OMOP `concept` table"):
+    for concept_file in tqdm(
+        itertools.chain(*get_table_files(path_to_src_omop_dir, "concept")),
+        total=len(get_table_files(path_to_src_omop_dir, "concept")[0])
+        + len(get_table_files(path_to_src_omop_dir, "concept")[1]),
+        desc="Generating metadata from OMOP `concept` table",
+    ):
         # Note: Concept table is often split into gzipped shards by default
         if verbose:
             print(concept_file)
@@ -498,9 +538,12 @@ def extract_metadata(path_to_src_omop_dir: str, path_to_decompressed_dir: str, v
 
     # Include map from custom concepts to normalized (ie standard ontology)
     # parent concepts, where possible, in the code_metadata dictionary
-    for concept_relationship_file in tqdm(itertools.chain(*get_table_files(path_to_src_omop_dir, "concept_relationship")),
-                                                          total=len(get_table_files(path_to_src_omop_dir, "concept_relationship")[0]) + len(get_table_files(path_to_src_omop_dir, "concept_relationship")[1]),
-                                                          desc="Generating metadata from OMOP `concept_relationship` table"):
+    for concept_relationship_file in tqdm(
+        itertools.chain(*get_table_files(path_to_src_omop_dir, "concept_relationship")),
+        total=len(get_table_files(path_to_src_omop_dir, "concept_relationship")[0])
+        + len(get_table_files(path_to_src_omop_dir, "concept_relationship")[1]),
+        desc="Generating metadata from OMOP `concept_relationship` table",
+    ):
         with load_file(path_to_decompressed_dir, concept_relationship_file) as f:
             # This table has `concept_id_1`, `concept_id_2`, `relationship_id` columns
             concept_relationship = read_polars_df(f.name)
@@ -527,9 +570,12 @@ def extract_metadata(path_to_src_omop_dir: str, path_to_decompressed_dir: str, v
     # Extract dataset metadata e.g., the CDM source name and its release date
     datasets: List[str] = []
     dataset_versions: List[str] = []
-    for cdm_source_file in tqdm(itertools.chain(*get_table_files(path_to_src_omop_dir, "cdm_source")),
-                                total=len(get_table_files(path_to_src_omop_dir, "cdm_source")[0]) + len(get_table_files(path_to_src_omop_dir, "cdm_source")[1]),
-                                desc="Extracting dataset metadata"):
+    for cdm_source_file in tqdm(
+        itertools.chain(*get_table_files(path_to_src_omop_dir, "cdm_source")),
+        total=len(get_table_files(path_to_src_omop_dir, "cdm_source")[0])
+        + len(get_table_files(path_to_src_omop_dir, "cdm_source")[1]),
+        desc="Extracting dataset metadata",
+    ):
         with load_file(path_to_decompressed_dir, cdm_source_file) as f:
             cdm_source = read_polars_df(f.name)
             cdm_source = cdm_source.rename({c: c.lower() for c in cdm_source.columns})
@@ -677,7 +723,7 @@ def main():
             "visit": [
                 {"fallback_concept_id": DEFAULT_VISIT_CONCEPT_ID, "file_suffix": "occurrence"},
                 {
-                    "concept_id_field": "discharged_to_concept_id",
+                    "concept_id_field": "discharge_to_concept_id",
                     "time_field_options": ["visit_end_datetime", "visit_end_date"],
                     "file_suffix": "occurrence",
                 },
@@ -691,6 +737,17 @@ def main():
             "procedure": {
                 "file_suffix": "occurrence",
             },
+            # image_occurance table is an OMOP extension table
+            "image": [
+                {"force_concept_code": DEFAULT_IMAGE_CONCEPT_ID, "file_suffix": "occurrence"},
+                # {
+                #     "concept_id_field": "procedure_occurrence_id",
+                # },
+                # {
+                #     "concept_id_field": "visit_occurrence_id",
+                # },
+            ],
+            # ------
             "device_exposure": {
                 "concept_id_field": "device_concept_id",
             },
