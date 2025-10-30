@@ -119,6 +119,8 @@ def load_file(path_to_decompressed_dir: str, fname: str) -> Any:
 
 
 def cast_to_datetime(schema: Any, column: str, move_to_end_of_day: bool = False):
+    if column not in schema.names():
+        return pl.lit(None, dtype=pl.Datetime(time_unit="us"))
     if schema[column] == pl.Utf8():
         if not move_to_end_of_day:
             return meds_etl.utils.parse_time(pl.col(column), OMOP_TIME_FORMATS)
@@ -364,7 +366,7 @@ def write_event_data(
         # Write this part of the MEDS Unsorted file to disk
         fname = os.path.join(path_to_MEDS_unsorted_dir, f'{table_name.replace("/", "_")}_{uuid.uuid4()}.parquet')
         try:
-            event_data.sink_parquet(fname, compression="zstd", compression_level=1, maintain_order=False)
+            event_data.collect(streaming=True).write_parquet(fname, compression="zstd", compression_level=1)
         except pl.exceptions.InvalidOperationError as e:
             print(table_name)
             print(e)
@@ -637,15 +639,27 @@ def main():
         help="If set, the job continues from a previous run, starting after the "
         "conversion to MEDS Unsorted but before converting from MEDS Unsorted to MEDS.",
     )
-
+    parser.add_argument("--force_refresh", action="store_true", help="If set, this will overwrite all previous MEDS data in the output dir.")
+    parser.add_argument("--omop_version", type=str, help="Switch between OMOP 5.3/5.4, default 5.4.")
     args = parser.parse_args()
 
     if not os.path.exists(args.path_to_src_omop_dir):
         raise ValueError(f'The source OMOP folder ("{args.path_to_src_omop_dir}") does not seem to exist?')
 
     # Create the directory where final MEDS files will go, if doesn't already exist
+    if args.force_refresh:
+        if os.path.exists(args.path_to_dest_meds_dir):
+            if args.verbose:
+                print(f"Deleting and recreating {args.path_to_dest_meds_dir}")
+            shutil.rmtree(args.path_to_dest_meds_dir)
     os.makedirs(args.path_to_dest_meds_dir, exist_ok=True)
 
+    if not args.omop_version:
+        omop_version = "5.4"
+    else:
+        omop_version = args.omop_version
+    if omop_version not in ["5.4", "5.3"]:
+        raise RuntimeError(f"OMOP version {omop_version} not supported")
     # Within the target directory, create temporary subfolder for holding files
     # that need to be decompressed as part of the ETL (via eg `load_file`)
     path_to_decompressed_dir = os.path.join(args.path_to_dest_meds_dir, "decompressed")
@@ -723,7 +737,7 @@ def main():
             "visit": [
                 {"fallback_concept_id": DEFAULT_VISIT_CONCEPT_ID, "file_suffix": "occurrence"},
                 {
-                    "concept_id_field": "discharge_to_concept_id",
+                    "concept_id_field": "discharged_to_concept_id" if omop_version == "5.4" else "discharge_to_concept_id",
                     "time_field_options": ["visit_end_datetime", "visit_end_date"],
                     "file_suffix": "occurrence",
                 },
