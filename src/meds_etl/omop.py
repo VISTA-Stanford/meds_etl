@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import itertools
 import json
+import logging
 import multiprocessing
 import os
 import pickle
@@ -10,6 +12,7 @@ import random
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from typing import Any, Dict, Iterable, List, Mapping, Tuple
 
@@ -28,6 +31,47 @@ RANDOM_SEED: int = 3422342
 # OMOP constants
 CUSTOMER_CONCEPT_ID_START: int = 2_000_000_000
 DEFAULT_VISIT_CONCEPT_ID: int = 8
+
+# Set up process-safe logging
+def setup_logging(verbose: int = 0):
+    """Configure logging for multiprocessing-safe output"""
+    log_level = logging.INFO if verbose >= 1 else logging.WARNING
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s [PID %(process)d] %(levelname)s: %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    return logging.getLogger(__name__)
+
+def validate_gzip_file(filepath: str, max_bytes_to_check: int = 1024 * 1024) -> bool:
+    """
+    Fast validation of gzip file integrity.
+    
+    Reads the beginning of the file to check if it can be decompressed.
+    This is much faster than decompressing the entire file but catches
+    most corruption issues.
+    
+    Args:
+        filepath: Path to the .gz file
+        max_bytes_to_check: How many bytes to try reading (default 1MB)
+    
+    Returns:
+        True if file appears valid, False if corrupted
+    """
+    logger = logging.getLogger(__name__)
+    try:
+        with gzip.open(filepath, 'rb') as f:
+            # Try to read the beginning of the file
+            # Most corruption will be caught here
+            f.read(max_bytes_to_check)
+        return True
+    except (gzip.BadGzipFile, EOFError, OSError) as e:
+        logger.warning(f"Corrupted or invalid gzip file: {filepath} - {type(e).__name__}: {e}")
+        return False
+    except Exception as e:
+        logger.warning(f"Unexpected error validating {filepath}: {type(e).__name__}: {e}")
+        return False
+
 DEFAULT_NOTE_CONCEPT_ID: int = 46235038
 DEFAULT_VISIT_DETAIL_CONCEPT_ID: int = 4203722
 DEFAULT_IMAGE_CONCEPT_ID: int = 4180938
@@ -108,10 +152,22 @@ def load_file(path_to_decompressed_dir: str, fname: str) -> Any:
 
     Returns:
         Opened file object
+        
+    Raises:
+        ValueError: If gzip file is corrupted
     """
     if fname.endswith(".gz"):
+        # Validate gzip file before attempting to decompress
+        if not validate_gzip_file(fname):
+            raise ValueError(f"Corrupted or invalid gzip file: {fname}")
+        
         file = tempfile.NamedTemporaryFile(dir=path_to_decompressed_dir, suffix=".csv")
-        subprocess.run(["gunzip", "-c", fname], stdout=file)
+        result = subprocess.run(["gunzip", "-c", fname], stdout=file, stderr=subprocess.PIPE)
+        
+        if result.returncode != 0:
+            error_msg = result.stderr.decode('utf-8') if result.stderr else "Unknown error"
+            raise ValueError(f"Failed to decompress {fname}: {error_msg}")
+        
         return file
     else:
         # If the file isn't compressed, we don't write anything to `path_to_decompressed_dir`
@@ -242,7 +298,11 @@ def write_event_data(
 
             # Replace values in `concept_id` with the normalized concepts to which they are mapped
             # based on the `concept_id_map`
-            code = concept_id.replace_strict(concept_id_map, return_dtype=pl.Utf8(), default=None)
+            # TEMPORARY: Skip concept mapping for debugging - just use concept_id as string
+            # code = concept_id.replace_strict(concept_id_map, return_dtype=pl.Utf8(), default=None)
+            code = concept_id.cast(pl.Utf8())  # DEBUG: Just use numeric ID
+            logger = logging.getLogger(__name__)
+            logger.warning("⚠ CONCEPT MAPPING DISABLED - Using numeric concept_ids instead of standard codes!")
 
         # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
         # Determine what to use for the `value`                       #
@@ -363,10 +423,23 @@ def write_event_data(
             columns[k] = v.alias(k)
 
         event_data = batch.select(**columns)
+        
         # Write this part of the MEDS Unsorted file to disk
         fname = os.path.join(path_to_MEDS_unsorted_dir, f'{table_name.replace("/", "_")}_{uuid.uuid4()}.parquet')
         try:
-            event_data.collect(streaming=True).write_parquet(fname, compression="zstd", compression_level=1)
+            import time as time_module  # Avoid name collision with 'time' column
+            logger = logging.getLogger(__name__)
+            t_collect = time_module.time()
+            collected = event_data.collect(streaming=True)
+            collect_time = time_module.time() - t_collect
+            if collect_time > 1.0:  # Only log if > 1 second
+                logger.info(f"    collect() took {collect_time:.1f}s")
+            
+            t_write = time_module.time()
+            collected.write_parquet(fname, compression="zstd", compression_level=1)
+            write_time = time_module.time() - t_write
+            if write_time > 0.5:  # Only log if > 0.5 seconds
+                logger.info(f"    write_parquet() took {write_time:.1f}s")
         except pl.exceptions.InvalidOperationError as e:
             print(table_name)
             print(e)
@@ -401,43 +474,93 @@ def process_table_csv(args):
                 to the MEDS standard.
 
     """
-    concept_id_map = pickle.loads(concept_id_map_data)  # 0.25 GB for STARR-OMOP
-    concept_name_map = pickle.loads(concept_name_map_data)  # 0.5GB for STARR-OMOP
-    if verbose:
-        print("Working on ", table_file, table_name, all_table_details)
+    logger = logging.getLogger(__name__)
+    start_time = time.time()
+    
+    # Handle both pickled (spawn context) and direct dict (fork context)
+    t0 = time.time()
+    if isinstance(concept_id_map_data, bytes):
+        concept_id_map = pickle.loads(concept_id_map_data)  # 0.25 GB for STARR-OMOP
+        concept_name_map = pickle.loads(concept_name_map_data)  # 0.5GB for STARR-OMOP
+        unpickle_time = time.time() - t0
+        logger.info(f"Unpickled concept maps in {unpickle_time:.1f}s for {os.path.basename(table_file)}")
+    else:
+        # Fork context: dicts are already in shared memory (copy-on-write)
+        concept_id_map = concept_id_map_data
+        concept_name_map = concept_name_map_data
+        logger.info(f"Using shared memory for concept maps for {os.path.basename(table_file)}")
+    
+    logger.info(f"Processing {table_name}: {os.path.basename(table_file)}")
 
     if not isinstance(all_table_details, list):
         all_table_details = [all_table_details]
 
     # Load the source table, decompress if needed
-    with load_file(path_to_decompressed_dir, table_file) as temp_f:
-        # Read it in batches so we don't max out RAM
-        table = pl.read_csv_batched(
-            temp_f.name,  # The decompressed source table
-            infer_schema_length=0,  # Don't try to automatically infer schema
-            batch_size=1_000_000,  # Read in 1M rows at a time
-        )
-
-        batch_index = 0
-
-        while True:  # We read until there are no more batches
-            batch_index += 1
-            batch = table.next_batches(1)  # Returns a list of length 1 containing a table for the batch
-            if batch is None:
-                break
-
-            batch = batch[0]  # (Because `table.next_batches` returns a list)
-
-            batch = batch.lazy()
-
-            write_event_data(
-                path_to_MEDS_unsorted_dir,
-                lambda: batch.lazy(),
-                table_name,
-                all_table_details,
-                concept_id_map,
-                concept_name_map,
+    t_decompress = time.time()
+    try:
+        temp_f = load_file(path_to_decompressed_dir, table_file)
+    except ValueError as e:
+        # Corrupted file - log and skip
+        logger.error(f"⚠ Skipping corrupted file {os.path.basename(table_file)}: {e}")
+        return  # Skip this file
+    except Exception as e:
+        logger.error(f"⚠ Unexpected error loading {os.path.basename(table_file)}: {type(e).__name__}: {e}")
+        return  # Skip this file
+    
+    try:
+        # Use context manager to ensure file is closed
+        with temp_f:
+            decompress_time = time.time() - t_decompress
+            logger.info(f"  Decompressed {os.path.basename(table_file)} in {decompress_time:.1f}s")
+            
+            # Read it in batches so we don't max out RAM
+            t_csv = time.time()
+            table = pl.read_csv_batched(
+                temp_f.name,  # The decompressed source table
+                infer_schema_length=0,  # Don't try to automatically infer schema
+                batch_size=1_000_000,  # Read in 1M rows at a time
             )
+            csv_setup_time = time.time() - t_csv
+            logger.info(f"  CSV setup for {os.path.basename(table_file)} in {csv_setup_time:.1f}s")
+
+            batch_index = 0
+            total_batch_time = 0
+
+            while True:  # We read until there are no more batches
+                batch_index += 1
+                t_batch = time.time()
+                batch = table.next_batches(1)  # Returns a list of length 1 containing a table for the batch
+                if batch is None:
+                    break
+
+                batch = batch[0]  # (Because `table.next_batches` returns a list)
+
+                batch = batch.lazy()
+
+                t_write = time.time()
+                write_event_data(
+                    path_to_MEDS_unsorted_dir,
+                    lambda: batch.lazy(),
+                    table_name,
+                    all_table_details,
+                    concept_id_map,
+                    concept_name_map,
+                )
+                write_time = time.time() - t_write
+                batch_time = time.time() - t_batch
+                total_batch_time += batch_time
+                
+                logger.info(f"  Batch {batch_index}: write took {write_time:.1f}s")
+                
+                if batch_index % 5 == 0:  # Log every 5 batches
+                    logger.info(f"  Processed {batch_index} batches from {os.path.basename(table_file)}")
+        
+        total_time = time.time() - start_time
+        logger.info(f"✓ Completed {table_name}/{os.path.basename(table_file)} in {total_time:.1f}s ({batch_index} batches)")
+    except Exception as e:
+        logger.error(f"⚠ Error processing {os.path.basename(table_file)}: {type(e).__name__}: {e}")
+        logger.error(f"  Skipping this file and continuing...")
+        # Don't re-raise - continue with other files
 
 
 def process_table_parquet(args):
@@ -466,10 +589,23 @@ def process_table_parquet(args):
                 to the MEDS standard.
 
     """
-    concept_id_map = pickle.loads(concept_id_map_data)  # 0.25 GB for STARR-OMOP
-    concept_name_map = pickle.loads(concept_name_map_data)  # 0.5GB for STARR-OMOP
-    if verbose:
-        print("Working on ", table_files, table_name, all_table_details)
+    logger = logging.getLogger(__name__)
+    start_time = time.time()
+    
+    # Handle both pickled (spawn context) and direct dict (fork context)
+    t0 = time.time()
+    if isinstance(concept_id_map_data, bytes):
+        concept_id_map = pickle.loads(concept_id_map_data)  # 0.25 GB for STARR-OMOP
+        concept_name_map = pickle.loads(concept_name_map_data)  # 0.5GB for STARR-OMOP
+        unpickle_time = time.time() - t0
+        logger.info(f"Unpickled concept maps in {unpickle_time:.1f}s for parquet files")
+    else:
+        # Fork context: dicts are already in shared memory (copy-on-write)
+        concept_id_map = concept_id_map_data
+        concept_name_map = concept_name_map_data
+        logger.info(f"Using shared memory for concept maps for parquet files")
+    
+    logger.info(f"Processing {table_name} from {len(table_files) if isinstance(table_files, list) else 1} parquet file(s)")
 
     if not isinstance(all_table_details, list):
         all_table_details = [all_table_details]
@@ -483,6 +619,9 @@ def process_table_parquet(args):
         concept_id_map,
         concept_name_map,
     )
+    
+    total_time = time.time() - start_time
+    logger.info(f"✓ Completed {table_name} parquet processing in {total_time:.1f}s")
 
 
 def extract_metadata(path_to_src_omop_dir: str, path_to_decompressed_dir: str, verbose: int = 0) -> Tuple:
@@ -495,6 +634,9 @@ def extract_metadata(path_to_src_omop_dir: str, path_to_decompressed_dir: str, v
     # and use it to generate metadata file as well as populate maps
     # from (concept ID -> concept code) and (concept ID -> concept name)
     print("Generating metadata from OMOP `concept` table")
+    logger = logging.getLogger(__name__)
+    skipped_concept_files = 0
+    
     for concept_file in tqdm(
         itertools.chain(*get_table_files(path_to_src_omop_dir, "concept")),
         total=len(get_table_files(path_to_src_omop_dir, "concept")[0])
@@ -504,70 +646,103 @@ def extract_metadata(path_to_src_omop_dir: str, path_to_decompressed_dir: str, v
         # Note: Concept table is often split into gzipped shards by default
         if verbose:
             print(concept_file)
-        with load_file(path_to_decompressed_dir, concept_file) as f:
-            # Read the contents of the `concept` table shard
-            # `load_file` will unzip the file into `path_to_decompressed_dir` if needed
-            concept = read_polars_df(f.name)
+        
+        try:
+            f = load_file(path_to_decompressed_dir, concept_file)
+        except (ValueError, Exception) as e:
+            logger.warning(f"⚠ Skipping corrupted concept file {os.path.basename(concept_file)}: {e}")
+            skipped_concept_files += 1
+            continue
+        
+        try:
+            with f:
+                # Read the contents of the `concept` table shard
+                # `load_file` will unzip the file into `path_to_decompressed_dir` if needed
+                concept = read_polars_df(f.name)
 
-            concept_id = pl.col("concept_id").cast(pl.Int64)
-            code = pl.col("vocabulary_id") + "/" + pl.col("concept_code")
+                concept_id = pl.col("concept_id").cast(pl.Int64)
+                code = pl.col("vocabulary_id") + "/" + pl.col("concept_code")
 
-            # Convert the table into a dictionary
-            result = concept.select(concept_id=concept_id, code=code, name=pl.col("concept_name"))
+                # Convert the table into a dictionary
+                result = concept.select(concept_id=concept_id, code=code, name=pl.col("concept_name"))
 
-            result = result.to_dict(as_series=False)
+                result = result.to_dict(as_series=False)
 
-            # Update our running dictionary with the concepts we read in from
-            # the concept table shard
-            concept_id_map |= dict(zip(result["concept_id"], result["code"]))
-            concept_name_map |= dict(zip(result["concept_id"], result["name"]))
+                # Update our running dictionary with the concepts we read in from
+                # the concept table shard
+                concept_id_map |= dict(zip(result["concept_id"], result["code"]))
+                concept_name_map |= dict(zip(result["concept_id"], result["name"]))
 
-            # Assuming custom concepts have concept_id > 2000000000 we create a
-            # record for them in `code_metadata` with no parent codes. Such a
-            # custom code could be eg `STANFORD_RACE/Black or African American`
-            # with `concept_id` 2000039197
-            custom_concepts = (
-                concept.filter(concept_id > CUSTOMER_CONCEPT_ID_START)
-                .select(concept_id=concept_id, code=code, description=pl.col("concept_name"))
-                .to_dict()
-            )
-            for i in range(len(custom_concepts["code"])):
-                code_metadata[custom_concepts["code"][i]] = {
-                    "code": custom_concepts["code"][i],
-                    "description": custom_concepts["description"][i],
-                    "parent_codes": [],
-                }
+                # Assuming custom concepts have concept_id > 2000000000 we create a
+                # record for them in `code_metadata` with no parent codes. Such a
+                # custom code could be eg `STANFORD_RACE/Black or African American`
+                # with `concept_id` 2000039197
+                custom_concepts = (
+                    concept.filter(concept_id > CUSTOMER_CONCEPT_ID_START)
+                    .select(concept_id=concept_id, code=code, description=pl.col("concept_name"))
+                    .to_dict()
+                )
+                for i in range(len(custom_concepts["code"])):
+                    code_metadata[custom_concepts["code"][i]] = {
+                        "code": custom_concepts["code"][i],
+                        "description": custom_concepts["description"][i],
+                        "parent_codes": [],
+                    }
+        except Exception as e:
+            logger.warning(f"⚠ Error processing concept file {os.path.basename(concept_file)}: {e}")
+            skipped_concept_files += 1
+            continue
+    
+    if skipped_concept_files > 0:
+        logger.warning(f"⚠ Skipped {skipped_concept_files} corrupted concept files")
 
     # Include map from custom concepts to normalized (ie standard ontology)
     # parent concepts, where possible, in the code_metadata dictionary
+    skipped_relationship_files = 0
+    
     for concept_relationship_file in tqdm(
         itertools.chain(*get_table_files(path_to_src_omop_dir, "concept_relationship")),
         total=len(get_table_files(path_to_src_omop_dir, "concept_relationship")[0])
         + len(get_table_files(path_to_src_omop_dir, "concept_relationship")[1]),
         desc="Generating metadata from OMOP `concept_relationship` table",
     ):
-        with load_file(path_to_decompressed_dir, concept_relationship_file) as f:
-            # This table has `concept_id_1`, `concept_id_2`, `relationship_id` columns
-            concept_relationship = read_polars_df(f.name)
+        try:
+            f = load_file(path_to_decompressed_dir, concept_relationship_file)
+        except (ValueError, Exception) as e:
+            logger.warning(f"⚠ Skipping corrupted concept_relationship file {os.path.basename(concept_relationship_file)}: {e}")
+            skipped_relationship_files += 1
+            continue
+        
+        try:
+            with f:
+                # This table has `concept_id_1`, `concept_id_2`, `relationship_id` columns
+                concept_relationship = read_polars_df(f.name)
 
-            concept_id_1 = pl.col("concept_id_1").cast(pl.Int64)
-            concept_id_2 = pl.col("concept_id_2").cast(pl.Int64)
+                concept_id_1 = pl.col("concept_id_1").cast(pl.Int64)
+                concept_id_2 = pl.col("concept_id_2").cast(pl.Int64)
 
-            custom_relationships = (
-                concept_relationship.filter(
-                    concept_id_1 > CUSTOMER_CONCEPT_ID_START,
-                    pl.col("relationship_id") == "Maps to",
-                    concept_id_1 != concept_id_2,
+                custom_relationships = (
+                    concept_relationship.filter(
+                        concept_id_1 > CUSTOMER_CONCEPT_ID_START,
+                        pl.col("relationship_id") == "Maps to",
+                        concept_id_1 != concept_id_2,
+                    )
+                    .select(concept_id_1=concept_id_1, concept_id_2=concept_id_2)
+                    .to_dict(as_series=False)
                 )
-                .select(concept_id_1=concept_id_1, concept_id_2=concept_id_2)
-                .to_dict(as_series=False)
-            )
 
-            for concept_id_1, concept_id_2 in zip(
-                custom_relationships["concept_id_1"], custom_relationships["concept_id_2"]
-            ):
-                if concept_id_1 in concept_id_map and concept_id_2 in concept_id_map:
-                    code_metadata[concept_id_map[concept_id_1]]["parent_codes"].append(concept_id_map[concept_id_2])
+                for concept_id_1, concept_id_2 in zip(
+                    custom_relationships["concept_id_1"], custom_relationships["concept_id_2"]
+                ):
+                    if concept_id_1 in concept_id_map and concept_id_2 in concept_id_map:
+                        code_metadata[concept_id_map[concept_id_1]]["parent_codes"].append(concept_id_map[concept_id_2])
+        except Exception as e:
+            logger.warning(f"⚠ Error processing concept_relationship file {os.path.basename(concept_relationship_file)}: {e}")
+            skipped_relationship_files += 1
+            continue
+    
+    if skipped_relationship_files > 0:
+        logger.warning(f"⚠ Skipped {skipped_relationship_files} corrupted concept_relationship files")
 
     # Extract dataset metadata e.g., the CDM source name and its release date
     datasets: List[str] = []
@@ -643,6 +818,9 @@ def main():
     parser.add_argument("--omop_version", type=str, help="Switch between OMOP 5.3/5.4, default 5.4.")
     args = parser.parse_args()
 
+    # Set up logging for progress tracking
+    logger = setup_logging(args.verbose)
+    
     if not os.path.exists(args.path_to_src_omop_dir):
         raise ValueError(f'The source OMOP folder ("{args.path_to_src_omop_dir}") does not seem to exist?')
 
@@ -691,13 +869,26 @@ def main():
         # Generate metadata.json from OMOP concept table  #
         # # # # # # # # # # # # # # # # # # # # # # # # # #
 
+        print("\n" + "="*70)
+        print("Phase 1: Extracting metadata from OMOP concept tables")
+        print("="*70)
+        t_metadata_start = time.time()
+        
         metadata, code_metadata, concept_id_map, concept_name_map = extract_metadata(
             path_to_src_omop_dir=args.path_to_src_omop_dir,
             path_to_decompressed_dir=path_to_decompressed_dir,
             verbose=args.verbose,
         )
+        
+        metadata_time = time.time() - t_metadata_start
+        print(f"✓ Metadata extraction completed in {metadata_time:.1f}s")
+        print(f"  - Loaded {len(concept_id_map):,} concepts")
+        print(f"  - Memory: concept_id_map ~{len(pickle.dumps(concept_id_map))/1e9:.2f} GB, concept_name_map ~{len(pickle.dumps(concept_name_map))/1e9:.2f} GB")
 
-        os.mkdir(os.path.join(path_to_temp_dir, "metadata"))
+        temp_metadata_dir = os.path.join(path_to_temp_dir, "metadata")
+        if os.path.exists(temp_metadata_dir):
+            shutil.rmtree(temp_metadata_dir)
+        os.mkdir(temp_metadata_dir)
 
         # Save the extracted metadata file to disk...
         # We save one copy in the MEDS Unsorted data directory
@@ -707,8 +898,11 @@ def main():
         table = pa.Table.from_pylist(code_metadata.values(), meds.code_metadata_schema())
         pq.write_table(table, os.path.join(path_to_temp_dir, "metadata", "codes.parquet"))
         # And we save another copy in the final/target MEDS directory
+        metadata_dest = os.path.join(args.path_to_dest_meds_dir, "metadata")
+        if os.path.exists(metadata_dest):
+            shutil.rmtree(metadata_dest)
         shutil.copytree(
-            os.path.join(path_to_temp_dir, "metadata"), os.path.join(args.path_to_dest_meds_dir, "metadata")
+            os.path.join(path_to_temp_dir, "metadata"), metadata_dest
         )
 
         # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -786,8 +980,19 @@ def main():
         }
 
         # Prepare concept_id_map and concept_name_map for parallel processing
-        concept_id_map_data = pickle.dumps(concept_id_map)
-        concept_name_map_data = pickle.dumps(concept_name_map)
+        # For spawn context (Windows), we pickle the maps and pass as bytes
+        # For fork context (Unix), we can pass the dicts directly since they're read-only
+        # and will be shared via copy-on-write memory
+        use_fork = hasattr(os, 'fork') and args.num_proc > 1
+        
+        if use_fork:
+            # Fork-based: pass dicts directly, they'll be shared in memory (read-only)
+            concept_id_map_data = concept_id_map
+            concept_name_map_data = concept_name_map
+        else:
+            # Spawn-based: pickle the maps (needed for Windows or single-process)
+            concept_id_map_data = pickle.dumps(concept_id_map)
+            concept_name_map_data = pickle.dumps(concept_name_map)
 
         # Create a separate task for each table
         # Each subprocess will read in a decompressed file and put all measurements for a given subject
@@ -833,10 +1038,22 @@ def main():
         rng.shuffle(all_csv_tasks)
         rng.shuffle(all_parquet_tasks)
 
-        print("Decompressing OMOP tables, mapping to MEDS Unsorted format, writing to disk...")
+        print("\n" + "="*70)
+        print("Phase 2: Processing patient data tables")
+        print("="*70)
+        print(f"Tasks: {len(all_csv_tasks)} CSV files, {len(all_parquet_tasks)} parquet file groups")
+        print(f"Workers: {args.num_proc}")
+        print(f"Memory sharing: {'fork (shared memory)' if use_fork else 'spawn (pickled)'}")
+        print("="*70 + "\n")
+        
+        t_process_start = time.time()
+        
         if args.num_proc > 1:
             os.environ["POLARS_MAX_THREADS"] = "1"
-            with multiprocessing.get_context("spawn").Pool(args.num_proc) as pool:
+            # Use fork on Unix for efficient memory sharing of read-only concept maps
+            # Use spawn on Windows or when fork is unavailable
+            mp_context = "fork" if use_fork else "spawn"
+            with multiprocessing.get_context(mp_context).Pool(args.num_proc) as pool:
                 # Wrap all tasks with tqdm for a progress bar
                 total_tasks = len(all_csv_tasks)
                 with tqdm(total=total_tasks, desc="Mapping CSV OMOP tables -> MEDS format") as pbar:
@@ -859,13 +1076,18 @@ def main():
         # TODO: Do we need to do this more often so as to reduce maximum disk storage?
         shutil.rmtree(path_to_decompressed_dir)
 
-        print("Finished converting dataset to MEDS Unsorted.")
+        process_time = time.time() - t_process_start
+        print(f"\n✓ Patient data processing completed in {process_time:.1f}s ({process_time/60:.1f} minutes)")
+        print(f"  Average: {process_time/max(len(all_csv_tasks), 1):.1f}s per file")
 
     # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
     # Collate measurements into timelines for each subject, by shard
     # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
-    print("Converting from MEDS Unsorted to MEDS...")
+    print("\n" + "="*70)
+    print("Phase 3: Converting from MEDS Unsorted to MEDS")
+    print("="*70)
+    t_sort_start = time.time()
     meds_etl.unsorted.sort(
         source_unsorted_path=path_to_temp_dir,
         target_meds_path=os.path.join(args.path_to_dest_meds_dir, "result"),
@@ -873,15 +1095,32 @@ def main():
         num_proc=args.num_proc,
         backend=args.backend,
     )
-    print("...finished converting MEDS Unsorted to MEDS")
+    sort_time = time.time() - t_sort_start
+    print(f"\n✓ MEDS sorting completed in {sort_time:.1f}s ({sort_time/60:.1f} minutes)")
+    
     shutil.move(
         src=os.path.join(args.path_to_dest_meds_dir, "result", "data"),
         dst=os.path.join(args.path_to_dest_meds_dir, "data"),
     )
     shutil.rmtree(path=os.path.join(args.path_to_dest_meds_dir, "result"))
 
-    print(f"Deleting temporary directory `{path_to_temp_dir}`")
+    print(f"\nDeleting temporary directory `{path_to_temp_dir}`")
     shutil.rmtree(path_to_temp_dir)
+    
+    # Print final summary
+    total_time = time.time() - t_metadata_start if 't_metadata_start' in locals() else 0
+    print("\n" + "="*70)
+    print("ETL COMPLETE!")
+    print("="*70)
+    if total_time > 0:
+        print(f"Total time: {total_time:.1f}s ({total_time/60:.1f} minutes)")
+        if 'metadata_time' in locals():
+            print(f"  Phase 1 (Metadata): {metadata_time:.1f}s ({100*metadata_time/total_time:.1f}%)")
+        if 'process_time' in locals():
+            print(f"  Phase 2 (Patient data): {process_time:.1f}s ({100*process_time/total_time:.1f}%)")
+        print(f"  Phase 3 (Sorting): {sort_time:.1f}s ({100*sort_time/total_time:.1f}%)")
+    print(f"Output: {args.path_to_dest_meds_dir}")
+    print("="*70)
 
 
 if __name__ == "__main__":

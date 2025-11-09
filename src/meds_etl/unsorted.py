@@ -156,19 +156,42 @@ def sort_polars(
 
     events = []
 
+    # Clean up any partial runs
     decompressed_dir = os.path.join(target_meds_path, "decompressed")
+    if os.path.exists(decompressed_dir):
+        shutil.rmtree(decompressed_dir)
     os.mkdir(decompressed_dir)
 
     temp_dir = os.path.join(target_meds_path, "temp")
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
     os.mkdir(temp_dir)
 
+    # Copy or update metadata
+    metadata_dest = os.path.join(target_meds_path, "metadata")
+    if os.path.exists(metadata_dest):
+        shutil.rmtree(metadata_dest)
+    shutil.copytree(os.path.join(source_unsorted_path, "metadata"), metadata_dest)
+
+    tasks = list(glob.glob(os.path.join(source_unsorted_path, "unsorted_data", "*")))
+
+    # Count unique patients to adjust num_shards if needed
+    print("Counting unique patients to determine optimal number of shards...")
+    unique_subjects = set()
+    for task in tqdm(tasks, desc="Scanning patient IDs"):
+        subjects_in_file = pl.scan_parquet(task).select(pl.col("subject_id")).unique().collect()
+        unique_subjects.update(subjects_in_file["subject_id"].to_list())
+    
+    num_unique_patients = len(unique_subjects)
+    original_num_shards = num_shards
+    num_shards = min(num_shards, max(1, num_unique_patients))
+    
+    if num_shards < original_num_shards:
+        print(f"Adjusted num_shards from {original_num_shards} to {num_shards} based on {num_unique_patients} unique patients")
+    
     # Make a folder called `{shard_index}` for each `shard_index` within `temp_dir`
     for shard_index in range(num_shards):
         os.mkdir(os.path.join(temp_dir, str(shard_index)))
-
-    shutil.copytree(os.path.join(source_unsorted_path, "metadata"), os.path.join(target_meds_path, "metadata"))
-
-    tasks = list(glob.glob(os.path.join(source_unsorted_path, "unsorted_data", "*")))
 
     rng = random.Random(3422342)
     rng.shuffle(tasks)
@@ -220,6 +243,8 @@ def sort_polars(
     logging.info("Processing each shard")
 
     data_dir = os.path.join(target_meds_path, "data")
+    if os.path.exists(data_dir):
+        shutil.rmtree(data_dir)
     os.mkdir(data_dir)
 
     print("Collating source table data, shard by shard, to create subject timelines...")
