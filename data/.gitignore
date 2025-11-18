@@ -1,0 +1,41 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Data files
+*.parquet
+*.csv
+*.tsv
+*.json
+*.jsonl
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+*.feather
+*.arrow
+
+# Compressed files
+*.gz
+*.zip
+*.tar
+*.tar.gz
+*.bz2
+*.xz
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+*.log
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Keep example configs and metadata structure
+!examples/**/metadata/*.json
+!examples/**/dataset.json
+

@@ -1,0 +1,81 @@
+{
+  "primary_key": "person_id",
+  "tables": [
+    {
+      "name": "condition_occurrence",
+      "ts_start": "condition_start_datetime",
+      "ts_end": "condition_end_datetime",
+      "code": "condition_source_value",
+      "metadata": [
+        "provider_id",
+        "visit_occurrence_id"
+      ]
+    },
+    {
+      "name": "drug_exposure",
+      "ts_start": "drug_exposure_start_datetime",
+      "ts_end": "drug_exposure_end_datetime",
+      "code": "drug_source_value",
+      "metadata": [
+        "provider_id",
+        "visit_occurrence_id",
+        "quantity"
+      ]
+    },
+    {
+      "name": "measurement",
+      "ts_start": "measurement_datetime",
+      "ts_end": "",
+      "code": "measurement_source_value",
+      "metadata": [
+        "value_as_number",
+        "value_source_value",
+        "unit_source_value",
+        "provider_id",
+        "visit_occurrence_id"
+      ]
+    },
+    {
+      "name": "observation",
+      "ts_start": "observation_datetime",
+      "ts_end": "",
+      "code": "observation_source_value",
+      "metadata": [
+        "value_as_string",
+        "value_as_number",
+        "provider_id",
+        "visit_occurrence_id"
+      ]
+    },
+    {
+      "name": "procedure_occurrence",
+      "ts_start": "procedure_datetime",
+      "ts_end": "",
+      "code": "procedure_source_value",
+      "metadata": [
+        "provider_id",
+        "visit_occurrence_id"
+      ]
+    },
+    {
+      "name": "visit_occurrence",
+      "ts_start": "visit_start_datetime",
+      "ts_end": "visit_end_datetime",
+      "code": "visit_source_value",
+      "metadata": [
+        "provider_id",
+        "care_site_id"
+      ]
+    },
+    {
+      "name": "visit_detail",
+      "ts_start": "visit_detail_start_datetime",
+      "ts_end": "visit_detail_end_datetime",
+      "code": "visit_detail_source_value",
+      "metadata": [
+        "provider_id",
+        "visit_occurrence_id"
+      ]
+    }
+  ]
+}

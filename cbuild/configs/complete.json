@@ -1,0 +1,175 @@
+{
+  "primary_key": "person_id",
+  "tables": [
+    {
+      "name": "person",
+      "ts_start": "birth_datetime",
+      "ts_end": "",
+      "code": "gender_source_value",
+      "metadata": [
+        "race_concept_id",
+        "ethnicity_concept_id"
+      ]
+    },
+    {
+      "name": "death",
+      "ts_start": "death_datetime",
+      "ts_end": "",
+      "code": "cause_source_value",
+      "metadata": [
+        "cause_concept_id",
+        "death_type_concept_id"
+      ]
+    },
+    {
+      "name": "visit_occurrence",
+      "ts_start": "visit_start_datetime",
+      "ts_end": "visit_end_datetime",
+      "code": "visit_source_value",
+      "metadata": [
+        "visit_occurrence_id",
+        "visit_type_concept_id",
+        "provider_id",
+        "care_site_id",
+        "visit_source_concept_id",
+        "admitting_source_concept_id",
+        "discharge_to_concept_id"
+      ]
+    },
+    {
+      "name": "visit_detail",
+      "ts_start": "visit_detail_start_datetime",
+      "ts_end": "visit_detail_end_datetime",
+      "code": "visit_detail_source_value",
+      "metadata": [
+        "visit_detail_id",
+        "visit_occurrence_id",
+        "visit_detail_type_concept_id",
+        "provider_id",
+        "care_site_id",
+        "visit_detail_source_concept_id",
+        "admitting_source_concept_id",
+        "discharge_to_concept_id"
+      ]
+    },
+    {
+      "name": "condition_occurrence",
+      "ts_start": "condition_start_datetime",
+      "ts_end": "condition_end_datetime",
+      "code": "condition_source_value",
+      "metadata": [
+        "visit_occurrence_id",
+        "provider_id"
+      ]
+    },
+    {
+      "name": "drug_exposure",
+      "ts_start": "drug_exposure_start_datetime",
+      "ts_end": "drug_exposure_end_datetime",
+      "code": "drug_source_value",
+      "metadata": [
+        "drug_exposure_id",
+        "visit_occurrence_id",
+        "visit_detail_id",
+        "drug_type_concept_id",
+        "drug_source_concept_id",
+        "route_concept_id",
+        "quantity",
+        "days_supply",
+        "provider_id"
+      ]
+    },
+    {
+      "name": "procedure_occurrence",
+      "ts_start": "procedure_datetime",
+      "ts_end": "",
+      "code": "procedure_source_value",
+      "metadata": [
+        "procedure_occurrence_id",
+        "visit_occurrence_id",
+        "visit_detail_id",
+        "procedure_type_concept_id",
+        "procedure_source_concept_id",
+        "modifier_concept_id",
+        "quantity",
+        "provider_id"
+      ]
+    },
+    {
+      "name": "device_exposure",
+      "ts_start": "device_exposure_start_datetime",
+      "ts_end": "device_exposure_end_datetime",
+      "code": "device_source_value",
+      "metadata": [
+        "visit_occurrence_id",
+        "device_type_concept_id",
+        "quantity",
+        "provider_id"
+      ]
+    },
+    {
+      "name": "measurement",
+      "ts_start": "measurement_datetime",
+      "ts_end": "",
+      "code": "measurement_source_value",
+      "metadata": [
+        "measurement_id",
+        "visit_occurrence_id",
+        "measurement_source_concept_id",
+        "value_as_number",
+        "value_source_value",
+        "unit_source_value",
+        "range_low",
+        "range_high",
+        "provider_id"
+      ]
+    },
+    {
+      "name": "observation",
+      "ts_start": "observation_datetime",
+      "ts_end": "",
+      "code": "observation_source_value",
+      "metadata": [
+        "observation_id",
+        "visit_occurrence_id",
+        "visit_detail_id",
+        "observation_type_concept_id",
+        "observation_source_concept_id",
+        "value_as_number",
+        "value_as_string",
+        "value_as_concept_id",
+        "unit_concept_id",
+        "qualifier_concept_id",
+        "provider_id"
+      ]
+    },
+    {
+      "name": "note",
+      "ts_start": "note_datetime",
+      "ts_end": "",
+      "code": "note_title",
+      "metadata": [
+        "note_id",
+        "visit_occurrence_id",
+        "visit_detail_id",
+        "note_type_concept_id",
+        "note_title",
+        "provider_id"
+      ]
+    },
+    {
+      "name": "image_occurrence",
+      "ts_start": "image_occurrence_date",
+      "ts_end": "",
+      "code": "modality_source_value",
+      "metadata": [
+        "image_occurrence_id",
+        "image_series_uid",
+        "image_study_uid",
+        "anatomic_site_source_value",
+        "procedure_occurrence_id",
+        "visit_occurrence_id"
+      ]
+    }
+  ]
+}
