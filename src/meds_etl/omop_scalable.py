@@ -72,7 +72,7 @@ SEPARATOR = "━" * 60
 
 def log_section(title: str):
     """Print a section header with separator lines."""
-    print(f"\n{SEPARATOR}")
+    #print(f"\n{SEPARATOR}")
     print(f"{title}")
     print(SEPARATOR)
 
@@ -722,6 +722,24 @@ def prescan_concept_ids(omop_dir: Path, config: Dict, num_workers: int, verbose:
 # ============================================================================
 
 
+def parse_compression(compression_str: str) -> Tuple[str, Optional[int]]:
+    """
+    Parse compression string like 'zstd:3' into (algorithm, level).
+    
+    Returns:
+        (algorithm, level) where level is None if not specified
+    
+    Examples:
+        'zstd' -> ('zstd', None)
+        'zstd:3' -> ('zstd', 3)
+        'lz4' -> ('lz4', None)
+    """
+    if ':' in compression_str:
+        algo, level = compression_str.split(':', 1)
+        return algo, int(level)
+    return compression_str, None
+
+
 def hash_subject_id(subject_id: str, num_shards: int) -> int:
     """Hash a subject_id to determine shard assignment."""
     hash_val = int(hashlib.md5(str(subject_id).encode()).hexdigest(), 16)
@@ -1160,12 +1178,18 @@ def flush_shard_buffer(
     # Concatenate all DataFrames in buffer
     df = pl.concat(dataframes, rechunk=True)
 
-    # Sort by (subject_id, time)
+    # Sort by (subject_id, time) - required for Stage 2 k-way merge
     df = df.sort(["subject_id", "time"])
 
-    # Write to Parquet
+    # Write to Parquet (skip statistics for temp files - only read once by Stage 2)
     output_file = shard_dir / f"run-worker{worker_id}-{run_seq}.parquet"
-    df.write_parquet(output_file, compression=compression)
+    
+    # Parse compression (e.g., "zstd:3" -> algo="zstd", level=3)
+    algo, level = parse_compression(compression)
+    if level is not None:
+        df.write_parquet(output_file, compression=algo, compression_level=level, statistics=False)
+    else:
+        df.write_parquet(output_file, compression=algo, statistics=False)
 
 
 # ============================================================================
@@ -1228,6 +1252,9 @@ def kway_merge_shard(
 
     writer = None
     schema_pa = None
+    
+    # Parse compression (e.g., "zstd:3" -> algo="zstd", level=3)
+    compression_algo, compression_level = parse_compression(compression)
 
     heap = []
     for i, file_path in enumerate(run_files):
@@ -1254,7 +1281,20 @@ def kway_merge_shard(
                 # Create DataFrame WITH explicit schema_overrides
                 df = pl.DataFrame(batch, schema_overrides=meds_schema)
                 schema_pa = df.to_arrow().schema
-                writer = pq.ParquetWriter(output_file, schema_pa, compression=compression)
+                # Keep statistics=True for final output (helps downstream queries)
+                if compression_level is not None:
+                    writer = pq.ParquetWriter(
+                        output_file, schema_pa, 
+                        compression=compression_algo, 
+                        compression_level=compression_level,
+                        write_statistics=True
+                    )
+                else:
+                    writer = pq.ParquetWriter(
+                        output_file, schema_pa, 
+                        compression=compression_algo,
+                        write_statistics=True
+                    )
 
             # Create DataFrame WITH explicit schema_overrides (fast - all dicts have same keys)
             df = pl.DataFrame(batch, schema_overrides=meds_schema)
@@ -1275,7 +1315,16 @@ def kway_merge_shard(
         df = pl.DataFrame(batch, schema_overrides=meds_schema)
 
         if writer is None:
-            df.write_parquet(output_file, compression=compression)
+            # Keep statistics for final output (no writer means this is the only batch)
+            if compression_level is not None:
+                df.write_parquet(
+                    output_file, 
+                    compression=compression_algo, 
+                    compression_level=compression_level,
+                    statistics=True
+                )
+            else:
+                df.write_parquet(output_file, compression=compression_algo, statistics=True)
         else:
             table = df.to_arrow()
             writer.write_table(table)
@@ -1776,7 +1825,11 @@ def main():
     parser.add_argument("--batch_size", type=int, default=100_000, help="Batch size for Stage 2 merge")
     parser.add_argument("--polars_threads", type=int, default=None, help="Polars threads per worker")
     parser.add_argument("--memory_limit_mb", type=int, default=None, help="Memory limit (auto-tunes rows_per_run)")
-    parser.add_argument("--compression", choices=["lz4", "zstd", "snappy", "gzip"], default="lz4")
+    parser.add_argument(
+        "--compression", 
+        default="zstd",
+        help="Compression algorithm (default: zstd). Use 'zstd:3' or 'zstd:7' for compression level control"
+    )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument(
         "--no-optimize-concepts",
