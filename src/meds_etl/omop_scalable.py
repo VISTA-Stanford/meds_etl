@@ -64,6 +64,30 @@ except ImportError:
 
 
 # ============================================================================
+# LOGGING UTILITIES
+# ============================================================================
+
+SEPARATOR = "━" * 60
+
+
+def log_section(title: str):
+    """Print a section header with separator lines."""
+    print(f"\n{SEPARATOR}")
+    print(f"{title}")
+    print(SEPARATOR)
+
+
+def log_kv(prefix: str, key: str, value: Any, width: int = 20):
+    """Print a key-value pair with consistent formatting."""
+    print(f"[{prefix}] {key:<{width}}: {value}")
+
+
+def log_info(prefix: str, message: str):
+    """Print an info message with prefix."""
+    print(f"[{prefix}] {message}")
+
+
+# ============================================================================
 # MEDS SCHEMA UTILITIES
 # ============================================================================
 
@@ -183,7 +207,7 @@ def config_type_to_polars(type_str: str) -> type:
     return type_map.get(type_str.lower(), pl.Utf8)
 
 
-def validate_config_against_data(omop_dir: Path, config: Dict) -> None:
+def validate_config_against_data(omop_dir: Path, config: Dict, verbose: bool = False) -> None:
     """
     Validate that the ETL config matches the actual Parquet data schema.
     
@@ -193,10 +217,6 @@ def validate_config_against_data(omop_dir: Path, config: Dict) -> None:
     
     Raises SystemExit if validation fails.
     """
-    print("\n" + "=" * 80)
-    print("VALIDATING ETL CONFIG AGAINST DATA SCHEMA")
-    print("=" * 80)
-    
     all_tables = {}
     
     # Collect all tables from canonical_events
@@ -220,10 +240,8 @@ def validate_config_against_data(omop_dir: Path, config: Dict) -> None:
             }
     
     if not all_tables:
-        print("WARNING: No tables found in config to validate")
+        log_info("WARN", "No tables found in config to validate")
         return
-    
-    print(f"\nValidating {len(all_tables)} table(s)...\n")
     
     errors = []
     
@@ -246,10 +264,8 @@ def validate_config_against_data(omop_dir: Path, config: Dict) -> None:
         # Read schema from first parquet file
         try:
             sample_file = parquet_files[0]
-            df_schema = pl.scan_parquet(sample_file).schema
+            df_schema = pl.scan_parquet(sample_file).collect_schema()
             actual_columns = set(df_schema.keys())
-            
-            print(f"  Validating '{table_name}' ({len(parquet_files)} file(s))...")
             
             # Check subject_id field (canonical events use global primary_key)
             if config_type == "canonical_event":
@@ -385,32 +401,21 @@ def validate_config_against_data(omop_dir: Path, config: Dict) -> None:
                         f"    Expected: {meta_type} (Polars: {expected_polars_type})\n"
                         f"    Actual: {actual_dtype}"
                     )
-            
-            if not errors or not any(table_name in err for err in errors):
-                print(f"    ✓ Schema validated ({len(actual_columns)} columns)")
         
         except Exception as e:
             errors.append(f"  ✗ Table '{table_name}': Failed to read schema from {sample_file}\n    Error: {e}")
     
-    print()
-    
     if errors:
-        print("=" * 80)
-        print("CONFIG VALIDATION FAILED")
-        print("=" * 80)
-        print("\nThe following errors were found:\n")
+        log_info("VALIDATION", "FAILED")
+        print()
         for error in errors:
             print(error)
-        print("\n" + "=" * 80)
-        print("Please fix the config file and try again.")
-        print("=" * 80)
-        import sys
+        print()
+        log_info("ERROR", "Please fix the config file and try again.")
         sys.exit(1)
     else:
-        print("=" * 80)
-        print("✓ CONFIG VALIDATION PASSED")
-        print("=" * 80)
-        print()
+        if verbose:
+            log_kv("VALIDATION", "status", "PASSED")
 
 
 # ============================================================================
@@ -424,9 +429,6 @@ def build_concept_map(omop_dir: Path, verbose: bool = False, include_custom: boo
 
     Optionally includes custom/site-specific concepts via concept_relationship.
     """
-    if verbose:
-        print("Building concept ID mapping from concept table...")
-
     start_time = time.time()
     concept_map = {}
 
@@ -443,16 +445,11 @@ def build_concept_map(omop_dir: Path, verbose: bool = False, include_custom: boo
                 concept_files.append(omop_dir / f"concept{ext}")
 
     if not concept_files:
-        if verbose:
-            print("  WARNING: No concept table found, concept_id mapping unavailable")
         return {}
 
     total_concepts = 0
 
-    # Use progress bar for concept file reading
-    concept_files_iter = tqdm(concept_files, desc="  Reading concept files", disable=not verbose, unit="file")
-
-    for file_path in concept_files_iter:
+    for file_path in concept_files:
         try:
             if str(file_path).endswith(".parquet"):
                 df = pl.read_parquet(file_path)
@@ -476,32 +473,19 @@ def build_concept_map(omop_dir: Path, verbose: bool = False, include_custom: boo
                         total_concepts += 1
 
         except Exception as e:
-            if verbose:
-                tqdm.write(f"  ERROR reading {file_path}: {e}")
+            # Silently skip problematic files
             continue
 
-    elapsed = time.time() - start_time
-    standard_count = len(concept_map)
-
-    if verbose:
-        print(f"  Loaded {total_concepts:,} standard concepts in {elapsed:.1f}s")
-
     # ========== Add custom concept mappings (optional) ==========
-    custom_count = 0
+    standard_count = len(concept_map)
     if include_custom:
-        custom_count = _add_custom_concept_mappings(omop_dir, concept_map, verbose)
-
-    if verbose:
-        print(f"\n  Total concepts: {len(concept_map):,}")
-        if include_custom:
-            print(f"    Standard: {standard_count:,}")
-            print(f"    Custom: {custom_count:,}")
-        print(f"  Memory: ~{len(concept_map) * 50 / 1024 / 1024:.1f} MB")
+        _add_custom_concept_mappings(omop_dir, concept_map, verbose)
+    custom_count = len(concept_map) - standard_count
 
     return concept_map
 
 
-def _add_custom_concept_mappings(omop_dir: Path, concept_map: Dict[int, str], verbose: bool) -> int:
+def _add_custom_concept_mappings(omop_dir: Path, concept_map: Dict[int, str], verbose: bool) -> None:
     """
     Add custom/site-specific concept mappings via concept_relationship (flat, no hierarchy).
 
@@ -510,11 +494,10 @@ def _add_custom_concept_mappings(omop_dir: Path, concept_map: Dict[int, str], ve
     - concept_id_2 is in concept_map (standard concept)
 
     Adds flat mapping: concept_map[custom_id] = concept_map[standard_id]
+    
+    Modifies concept_map in-place.
     """
     CUSTOM_CONCEPT_ID_START = 2_000_000_000
-
-    if verbose:
-        print("  Loading custom concept mappings from concept_relationship...")
 
     # Find concept_relationship files
     relationship_dir = omop_dir / "concept_relationship"
@@ -529,19 +512,9 @@ def _add_custom_concept_mappings(omop_dir: Path, concept_map: Dict[int, str], ve
                 relationship_files.append(omop_dir / f"concept_relationship{ext}")
 
     if not relationship_files:
-        if verbose:
-            print("    No concept_relationship table found, skipping custom concepts")
-        return 0
+        return
 
-    custom_added = 0
-    custom_start = time.time()
-
-    # Use progress bar for relationship file reading
-    relationship_files_iter = tqdm(
-        relationship_files, desc="    Reading concept_relationship files", disable=not verbose, unit="file"
-    )
-
-    for file_path in relationship_files_iter:
+    for file_path in relationship_files:
         try:
             if str(file_path).endswith(".parquet"):
                 df = pl.read_parquet(file_path)
@@ -562,19 +535,10 @@ def _add_custom_concept_mappings(omop_dir: Path, concept_map: Dict[int, str], ve
                 for custom_id, standard_id in custom_mappings.iter_rows():
                     if standard_id in concept_map:
                         concept_map[custom_id] = concept_map[standard_id]
-                        custom_added += 1
 
         except Exception as e:
-            if verbose:
-                tqdm.write(f"    ERROR reading {file_path}: {e}")
+            # Silently skip problematic files
             continue
-
-    custom_elapsed = time.time() - custom_start
-
-    if verbose:
-        print(f"    Added {custom_added:,} custom concepts in {custom_elapsed:.1f}s")
-
-    return custom_added
 
 
 def find_concept_id_columns_for_prescan(table_name: str, config: Dict) -> List[str]:
@@ -676,11 +640,10 @@ def prescan_concept_ids(omop_dir: Path, config: Dict, num_workers: int, verbose:
     Fast parallel pre-scan to collect all unique concept_ids used in OMOP data.
 
     Uses same greedy load balancing as main ETL.
+    
+    Returns:
+        Set of unique concept_ids found in the data
     """
-    # ALWAYS print pre-scan status (critical information)
-    print("\n  Pre-scanning data to optimize concept map...")
-    print(f"    Workers: {num_workers}")
-
     start_time = time.time()
 
     # Collect files to scan
@@ -713,10 +676,9 @@ def prescan_concept_ids(omop_dir: Path, config: Dict, num_workers: int, verbose:
             files_to_scan.append((file_path, concept_id_columns))
 
     if not files_to_scan:
-        print("    No files to scan")
+        if verbose:
+            log_info("STAGE 0", "No files to scan")
         return set()
-
-    print(f"    Files to scan: {len(files_to_scan)}")
 
     # Greedy load balancing
     file_info = []
@@ -751,11 +713,6 @@ def prescan_concept_ids(omop_dir: Path, config: Dict, num_workers: int, verbose:
     all_concept_ids = set()
     for worker_set in worker_results:
         all_concept_ids.update(worker_set)
-
-    elapsed = time.time() - start_time
-
-    # ALWAYS print pre-scan results (critical information)
-    print(f"    Found {len(all_concept_ids):,} unique concept_ids in {elapsed:.1f}s")
 
     return all_concept_ids
 
@@ -1438,16 +1395,12 @@ def discover_omop_files(omop_dir: Path, config: Dict, code_mapping_type: str, st
     
     # If strict mode and errors found, exit
     if strict and errors:
-        print("\n" + "=" * 80)
-        print("STRICT MODE: PIPELINE CANNOT PROCEED")
-        print("=" * 80)
-        print("\nThe following errors were found:\n")
+        log_info("ERROR", "STRICT MODE: PIPELINE CANNOT PROCEED")
+        print()
         for error in errors:
             print(f"  ✗ {error}")
-        print("\n" + "=" * 80)
-        print("Fix the config or data directory, or run with --no-strict to skip problematic tables.")
-        print("=" * 80)
-        import sys
+        print()
+        log_info("ERROR", "Fix the config or data directory, or run with --no-strict to skip problematic tables.")
         sys.exit(1)
 
     return files
@@ -1481,16 +1434,41 @@ def run_pipeline(
     Args:
         strict: If True (default), exit on missing tables or invalid config; if False, warn and skip
     """
-    # Validate config against actual data schema FIRST
-    validate_config_against_data(omop_dir, config)
+    # Print header
+    log_section("OMOP → MEDS ETL")
+    
+    if verbose:
+        # Runtime info
+        start_timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        log_kv("RUN", "start_time", start_timestamp)
+        log_kv("RUN", "strict_mode", "ON" if strict else "OFF")
+        log_kv("RUN", "verbose", "ON" if verbose else "OFF")
+        log_kv("RUN", "code_mapping", code_mapping_type)
+        
+        # Configuration
+        log_section("[CONFIG]")
+        log_kv("CONFIG", "omop_dir", omop_dir)
+        log_kv("CONFIG", "output_dir", output_dir)
+        log_kv("CONFIG", "config_file", config.get("_config_file", "unknown"))
+        log_kv("CONFIG", "shards", f"{num_shards:,}")
+        log_kv("CONFIG", "workers", num_workers)
+        log_kv("CONFIG", "rows_per_run", f"{rows_per_run:,}")
+        log_kv("CONFIG", "polars_thr", polars_threads if polars_threads else "auto")
+        log_kv("CONFIG", "compression", compression)
+    
+    # Validate config against actual data schema
+    if verbose:
+        log_section("[VALIDATION] ETL config vs OMOP data")
+    validate_config_against_data(omop_dir, config, verbose)
     
     # Build MEDS schema from config
     meds_schema = get_meds_schema_from_config(config)
 
-    print(f"\n=== MEDS SCHEMA ===")
-    print(f"Core columns: subject_id, time, code, numeric_value, text_value")
-    print(f"Metadata columns: {len(meds_schema) - 5}")
-    print(f"Total columns: {len(meds_schema)}")
+    if verbose:
+        log_section("[SCHEMA] MEDS")
+        log_info("SCHEMA", "core_columns      : subject_id, time, code, numeric_value, text_value")
+        log_kv("SCHEMA", "metadata_columns", len(meds_schema) - 5)
+        log_kv("SCHEMA", "total_columns", len(meds_schema))
 
     # Configure threading
     cpu_count = mp.cpu_count()
@@ -1500,11 +1478,7 @@ def run_pipeline(
     os.environ["POLARS_MAX_THREADS"] = str(polars_threads)
 
     # Memory auto-tuning
-    print(f"\n=== MEMORY CONFIGURATION ===")
     if memory_limit_mb:
-        print(f"Memory limit specified: {memory_limit_mb} MB (total system memory)")
-        print(f"Number of workers: {num_workers}")
-        
         # Calculate per-worker memory budget
         per_worker_mb = memory_limit_mb / num_workers * 0.7  # 70% usable per worker
         bytes_per_row = 1000  # Estimate: ~1KB per row with metadata
@@ -1514,28 +1488,24 @@ def run_pipeline(
         auto_rows_per_run = int(per_worker_rows_budget * 0.8)  # 80% of per-worker budget
         auto_rows_per_run = max(10_000, min(auto_rows_per_run, 1_000_000))
 
-        print(f"  Per-worker memory budget: {per_worker_mb:.0f} MB (70% of {memory_limit_mb / num_workers:.0f} MB)")
-        print(f"  Estimated bytes per row: {bytes_per_row}")
-        print(f"  Per-worker rows budget: {per_worker_rows_budget:,}")
-        print(f"  Auto-tuned rows_per_run: {auto_rows_per_run:,} (80% of budget, capped at 1M)")
+        if verbose:
+            log_info("MEMORY", f"Auto-tune calculation: {memory_limit_mb} MB limit / {num_workers} workers * 0.7 = {per_worker_mb:.0f} MB/worker")
+            log_info("MEMORY", f"Auto-tuned rows_per_run: {auto_rows_per_run:,} (capped at 1M)")
         
         if rows_per_run != auto_rows_per_run:
-            print(f"  ✅ Overriding --rows_per_run: {rows_per_run:,} → {auto_rows_per_run:,}")
+            if verbose:
+                log_info("MEMORY", f"Overriding --rows_per_run: {rows_per_run:,} → {auto_rows_per_run:,}")
             rows_per_run = auto_rows_per_run
-        else:
-            print(f"  ℹ️  Using specified --rows_per_run: {rows_per_run:,} (matches auto-tune)")
-    else:
-        print(f"No memory limit specified")
-        print(f"  Using --rows_per_run: {rows_per_run:,}")
     
-    print(f"\n💾 Final memory settings:")
-    print(f"  rows_per_run: {rows_per_run:,} (total buffered rows per worker before flush)")
-    print(f"  Est. memory per worker: ~{(rows_per_run * 1000) / 1024 / 1024:.0f} MB")
-    print(f"  Est. total memory usage: ~{(rows_per_run * 1000 * num_workers) / 1024 / 1024:.0f} MB across {num_workers} workers")
-    
-    if memory_limit_mb and (rows_per_run * 1000 * num_workers) / 1024 / 1024 > memory_limit_mb:
-        print(f"  ⚠️  WARNING: Estimated memory ({(rows_per_run * 1000 * num_workers) / 1024 / 1024:.0f} MB) exceeds limit ({memory_limit_mb} MB)")
-        print(f"     Consider reducing --workers or specifying a manual --rows_per_run")
+    if verbose:
+        log_section("[MEMORY]")
+        log_kv("MEMORY", "memory_limit", f"{memory_limit_mb} MB" if memory_limit_mb else "none")
+        log_kv("MEMORY", "rows_per_run", f"{rows_per_run:,} (buffered rows per worker before flush)")
+        log_kv("MEMORY", "est_mem/worker", f"~{(rows_per_run * 1000) / 1024 / 1024:.0f} MB")
+        log_kv("MEMORY", "est_mem_total", f"~{(rows_per_run * 1000 * num_workers) / 1024 / 1024:.0f} MB across {num_workers} workers")
+        
+        if memory_limit_mb and (rows_per_run * 1000 * num_workers) / 1024 / 1024 > memory_limit_mb:
+            log_info("MEMORY", f"⚠️  WARNING: Estimated memory exceeds limit - consider reducing --workers")
 
     pipeline_start = time.time()
 
@@ -1548,17 +1518,17 @@ def run_pipeline(
     concept_map = None
     concept_df = None
     if code_mapping_type == "concept_id":
-        print("\n=== STAGE 0: BUILDING CONCEPT MAPPING ===")
+        log_section("[STAGE 0] Build concept mapping")
+        
         concept_map = build_concept_map(omop_dir, verbose)
         if not concept_map:
-            print("ERROR: concept_id mapping requested but concept table not found")
+            log_info("ERROR", "concept_id mapping requested but concept table not found")
             return
-        print(f"Loaded {len(concept_map):,} concept mappings")
+        
+        original_size = len(concept_map)
 
         # Optimize concept map by pre-scanning (default: ON)
         if optimize_concepts:
-            original_size = len(concept_map)
-
             # Pre-scan to find used concept_ids
             used_concept_ids = prescan_concept_ids(omop_dir, config, num_workers, verbose)
 
@@ -1566,39 +1536,38 @@ def run_pipeline(
             concept_map = {cid: code for cid, code in concept_map.items() if cid in used_concept_ids}
             filtered_size = len(concept_map)
 
-            # ALWAYS print optimization stats (critical information)
-            reduction_pct = 100 * (1 - filtered_size / original_size) if original_size > 0 else 0
-            print(
-                f"  Optimized concept map: {original_size:,} → {filtered_size:,} concepts ({reduction_pct:.1f}% reduction)"
-            )
+            if verbose:
+                reduction_pct = 100 * (1 - filtered_size / original_size) if original_size > 0 else 0
+                log_kv("STAGE 0", "optimized_map", f"{original_size:,} → {filtered_size:,} concepts ({reduction_pct:.1f}% reduction)")
+        else:
+            filtered_size = original_size
 
         # Build concept DataFrame ONCE in main process (shared across all workers via copy-on-write)
-        print("Building shared concept DataFrame...")
-        build_start = time.time()
         concept_df = pl.DataFrame({"concept_id": list(concept_map.keys()), "concept_code": list(concept_map.values())})
-        build_elapsed = time.time() - build_start
-        memory_mb = concept_df.estimated_size() / 1024 / 1024
-        print(f"  Built concept DataFrame: {len(concept_df):,} rows, ~{memory_mb:.1f} MB, {build_elapsed:.2f}s")
-        print(
-            f"  Memory per worker (shared via copy-on-write): ~{memory_mb:.1f} MB (not {memory_mb * num_workers:.1f} MB!)"
-        )
+        
+        if verbose:
+            memory_mb = concept_df.estimated_size() / 1024 / 1024
+            log_kv("STAGE 0", "concept_df_rows", f"{len(concept_df):,}")
+            log_kv("STAGE 0", "concept_df_size", f"~{memory_mb:.1f} MB")
+            log_kv("STAGE 0", "status", "LOADED")
 
     # Stage 1: Partition
-    print(f"\n=== STAGE 1: PARTITIONING ===")
+    log_section("[STAGE 1] Partitioning")
     stage1_start = time.time()
 
     files = discover_omop_files(omop_dir, config, code_mapping_type, strict)
-    print(f"Found {len(files)} files to process")
+    
+    if verbose:
+        log_kv("STAGE 1", "files_to_process", len(files))
 
     if not files:
-        msg = "ERROR: No files found to process"
+        msg = "No files found to process"
         if strict:
-            print(f"\n{msg}")
-            print("In strict mode, this is a fatal error.")
-            import sys
+            log_info("ERROR", msg)
+            log_info("ERROR", "In strict mode, this is a fatal error.")
             sys.exit(1)
         else:
-            print(f"WARNING: {msg}")
+            log_info("WARN", msg)
             return
 
     # Greedy load balancing
@@ -1635,9 +1604,11 @@ def run_pipeline(
     ]
 
     # Run workers with progress tracking
-    print(f"\n⚡ Processing {len(files)} files across {num_workers} workers...")
-    print(f"   Polars threads per worker: {polars_threads}")
-    print(f"   rows_per_run: {rows_per_run:,} (total buffered before flush)")
+    if verbose:
+        log_kv("STAGE 1", "workers", num_workers)
+        log_kv("STAGE 1", "polars_threads", polars_threads)
+        log_kv("STAGE 1", "rows_per_run", f"{rows_per_run:,}")
+    print()  # Blank line before progress bar
 
     with mp.Pool(processes=num_workers) as pool:
         # Start workers asynchronously
@@ -1701,21 +1672,33 @@ def run_pipeline(
     stage1_elapsed = time.time() - stage1_start
     total_rows = sum(r["rows_processed"] for r in results)
 
-    print(f"\n✅ Stage 1 completed:")
-    print(f"   Rows processed: {total_rows:,}")
-    print(f"   Time: {stage1_elapsed:.2f}s")
-    print(f"   Throughput: {total_rows/stage1_elapsed:,.0f} rows/sec")
+    print()  # Blank line after progress bar
+    if verbose:
+        log_kv("STAGE 1", "time", f"{stage1_elapsed:.2f}s")
+        log_kv("STAGE 1", "file_rate", f"{len(files)/stage1_elapsed:.2f} files/s")
+        log_kv("STAGE 1", "rows_processed", f"{total_rows:,}")
+        log_kv("STAGE 1", "throughput", f"{total_rows/stage1_elapsed:,.0f} rows/s")
+        log_kv("STAGE 1", "output_dir", temp_dir)
+        log_kv("STAGE 1", "merge_stage", "SKIPPED (--skip-merge)" if skip_merge else "NEXT")
 
     # Stage 2: Merge (optional - can be disabled)
     if skip_merge:
-        print(f"\n⏭️  Stage 2 (merge) SKIPPED - partitioned data in {temp_dir}")
-        print(f"\n=== PIPELINE COMPLETE (Stage 1 only) ===")
-        print(f"Total time: {stage1_elapsed:.2f}s")
-        print(f"Partitioned output: {temp_dir}")
+        if verbose:
+            log_section("[SUMMARY] OMOP → MEDS ETL (Stage 1 only)")
+            log_kv("SUMMARY", "stages_run", "Stage 0 (concept map), Stage 1 (partitioning)" if code_mapping_type == "concept_id" else "Stage 1 (partitioning)")
+            log_kv("SUMMARY", "stages_skipped", "Stage 2 (merge)")
+            log_kv("SUMMARY", "total_rows", f"{total_rows:,}")
+            log_kv("SUMMARY", "total_time", f"{stage1_elapsed:.2f}s")
+            log_kv("SUMMARY", "partitioned_output", temp_dir)
+            log_kv("SUMMARY", "exit_status", "SUCCESS")
+        else:
+            # Simple summary for non-verbose
+            print(f"✅ Stage 1 complete: {total_rows:,} rows in {stage1_elapsed:.2f}s ({total_rows/stage1_elapsed:,.0f} rows/s)")
         return
     
-    print(f"\n=== STAGE 2: MERGING ===")
-    print(f"Merging {num_shards} shards...")
+    log_section("[STAGE 2] Merging")
+    if verbose:
+        log_kv("STAGE 2", "shards", num_shards)
     stage2_start = time.time()
 
     merge_args = [
@@ -1723,6 +1706,7 @@ def run_pipeline(
     ]
 
     # Run merge workers with progress tracking
+    print()  # Blank line before progress bar
     with mp.Pool(processes=min(num_workers, num_shards)) as pool:
         # Use imap_unordered to get results as they complete
         results_iter = pool.imap_unordered(merge_worker, merge_args)
@@ -1735,24 +1719,35 @@ def run_pipeline(
                 pbar.update(1)
 
     stage2_elapsed = time.time() - stage2_start
-    total_rows = sum(r["rows"] for r in results)
+    total_rows_merged = sum(r["rows"] for r in results)
 
-    print(f"\nStage 2 completed:")
-    print(f"  Total rows: {total_rows:,}")
-    print(f"  Time: {stage2_elapsed:.2f}s")
-    print(f"  Throughput: {total_rows/stage2_elapsed:,.0f} rows/sec")
+    print()  # Blank line after progress bar
+    if verbose:
+        log_kv("STAGE 2", "time", f"{stage2_elapsed:.2f}s")
+        log_kv("STAGE 2", "rows_merged", f"{total_rows_merged:,}")
+        log_kv("STAGE 2", "throughput", f"{total_rows_merged/stage2_elapsed:,.0f} rows/s")
 
     pipeline_elapsed = time.time() - pipeline_start
 
-    print(f"\n=== PIPELINE COMPLETE ===")
-    print(f"Total time: {pipeline_elapsed:.2f}s")
-    print(f"Output: {final_dir}")
+    if verbose:
+        log_section("[SUMMARY] OMOP → MEDS ETL (Complete)")
+        stages_run = "Stage 1 (partitioning), Stage 2 (merge)"
+        if code_mapping_type == "concept_id":
+            stages_run = "Stage 0 (concept map), " + stages_run
+        log_kv("SUMMARY", "stages_run", stages_run)
+        log_kv("SUMMARY", "total_rows", f"{total_rows_merged:,}")
+        log_kv("SUMMARY", "total_time", f"{pipeline_elapsed:.2f}s")
+        log_kv("SUMMARY", "final_output", final_dir)
+        log_kv("SUMMARY", "exit_status", "SUCCESS")
+    else:
+        # Simple summary for non-verbose
+        print(f"✅ Pipeline complete: {total_rows_merged:,} rows in {pipeline_elapsed:.2f}s")
 
     summary = {
         "code_mapping": code_mapping_type,
         "num_shards": num_shards,
         "num_workers": num_workers,
-        "total_rows": total_rows,
+        "total_rows": total_rows_merged,
         "total_time_sec": pipeline_elapsed,
         "schema_columns": len(meds_schema),
     }
@@ -1803,15 +1798,11 @@ def main():
 
     args = parser.parse_args()
 
-    print("=== SCALABLE OMOP TO MEDS ETL (Refactored) ===")
-    print(f"OMOP directory: {args.omop_dir}")
-    print(f"Output directory: {args.output_dir}")
-    print(f"Config: {args.config}")
-    print(f"Code mapping: {args.code_mapping}")
-    print(f"Strict mode: {'ENABLED' if args.strict else 'DISABLED (will skip problematic tables)'}")
-
     with open(args.config, "r") as f:
         config = json.load(f)
+    
+    # Store config filename for logging
+    config["_config_file"] = Path(args.config).name
 
     run_pipeline(
         omop_dir=Path(args.omop_dir),
