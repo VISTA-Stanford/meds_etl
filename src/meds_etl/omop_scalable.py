@@ -937,13 +937,18 @@ def transform_to_meds(
     # Execute transformation
     result = df.select(select_exprs)
     
-    # Fill missing schema columns with nulls
+    # Build final schema in single pass: add missing columns, reorder, and enforce types
+    existing_cols = set(result.columns)
+    final_select = []
     for col_name, col_type in meds_schema.items():
-        if col_name not in result.columns:
-            result = result.with_columns(pl.lit(None).cast(col_type).alias(col_name))
+        if col_name in existing_cols:
+            # Column exists - cast to correct type
+            final_select.append(pl.col(col_name).cast(col_type))
+        else:
+            # Column missing - add as null with correct type
+            final_select.append(pl.lit(None).cast(col_type).alias(col_name))
     
-    # Reorder to match schema and enforce types
-    result = result.select([pl.col(c).cast(meds_schema[c]) for c in meds_schema.keys()])
+    result = result.select(final_select)
     
     # Filter: require subject_id, time, and code
     result = result.filter(
@@ -1099,19 +1104,22 @@ def partition_worker(args: Tuple) -> Dict:
             
             # Flush if TOTAL buffered rows exceed threshold
             if total_buffered_rows >= rows_per_run:
-                for shard_id, buffer in shard_buffers.items():
-                    if buffer:
-                        flush_shard_buffer(
-                            shard_id, 
-                            buffer, 
-                            temp_dir, 
-                            worker_id, 
-                            run_sequence, 
-                            meds_schema, 
-                            compression
-                        )
-                        shard_buffers[shard_id] = []
-                        shard_row_counts[shard_id] = 0
+                # Only flush shards with data (avoid iterating empty shards)
+                active_shards = [sid for sid, buf in shard_buffers.items() if buf]
+                
+                for shard_id in active_shards:
+                    flush_shard_buffer(
+                        shard_id, 
+                        shard_buffers[shard_id], 
+                        temp_dir, 
+                        worker_id, 
+                        run_sequence, 
+                        meds_schema, 
+                        compression
+                    )
+                    shard_buffers[shard_id] = []
+                    shard_row_counts[shard_id] = 0
+                
                 run_sequence += 1
                 total_buffered_rows = 0
             
@@ -1132,18 +1140,19 @@ def partition_worker(args: Tuple) -> Dict:
                 except:
                     pass  # Ignore errors from progress counter
 
-    # Flush remaining buffers
-    for shard_id, buffer in shard_buffers.items():
-        if buffer:
-            flush_shard_buffer(
-                shard_id, 
-                buffer, 
-                temp_dir, 
-                worker_id, 
-                run_sequence, 
-                meds_schema, 
-                compression
-            )
+    # Flush remaining buffers (only shards with data)
+    active_shards = [sid for sid, buf in shard_buffers.items() if buf]
+    
+    for shard_id in active_shards:
+        flush_shard_buffer(
+            shard_id, 
+            shard_buffers[shard_id], 
+            temp_dir, 
+            worker_id, 
+            run_sequence, 
+            meds_schema, 
+            compression
+        )
 
     elapsed = time.time() - start_time
 
