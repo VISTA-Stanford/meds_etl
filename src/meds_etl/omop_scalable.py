@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 """
-Scalable OMOP to MEDS ETL Pipeline v2
+Scalable OMOP to MEDS ETL Pipeline
 
 MEDS-compliant implementation with:
 - subject_id (not person_id)
 - Datetime type for timestamps
 - Expanded metadata columns (not JSON strings)
 - Dynamic schema from config file
+- Schema-agnostic design (works for any EHR format)
+- DataFrame-based processing (no dict serialization)
 
-Key differences from v1:
-- Metadata expanded into separate nullable columns
-- Column name mappings (visit_occurrence_id → visit_id, etc.)
-- Proper MEDS datetime format
+Code Mapping Strategies:
+1. Fixed code (canonical events): "code": "MEDS_BIRTH"
+2. Template (vectorized string construction): "template": "IMAGE/{modality}|{site}"
+3. Source value (direct field): "source_value": {"field": "condition_source_value"}
+4. Concept ID (lookup via join): "concept_id": {"concept_id_field": "...", "source_concept_id_field": "..."}
 
 Usage:
-    python omop_scalable_v2.py \\
+    python omop_scalable.py \\
         --omop_dir /path/to/omop \\
         --output_dir /path/to/meds \\
-        --config omop_etl_simple_config.json \\
+        --config omop_etl_base_config.json \\
         --code_mapping source_value \\
         --shards 100 \\
         --workers 8
@@ -178,6 +181,236 @@ def config_type_to_polars(type_str: str) -> type:
         "datetime": pl.Datetime("us"),
     }
     return type_map.get(type_str.lower(), pl.Utf8)
+
+
+def validate_config_against_data(omop_dir: Path, config: Dict) -> None:
+    """
+    Validate that the ETL config matches the actual Parquet data schema.
+    
+    Reads one Parquet file per table and checks:
+    - All referenced columns exist in the data
+    - Metadata column types are compatible
+    
+    Raises SystemExit if validation fails.
+    """
+    print("\n" + "=" * 80)
+    print("VALIDATING ETL CONFIG AGAINST DATA SCHEMA")
+    print("=" * 80)
+    
+    all_tables = {}
+    
+    # Collect all tables from canonical_events
+    for event_name, event_config in config.get("canonical_events", {}).items():
+        table_name = event_config.get("table")
+        if table_name:
+            if table_name not in all_tables:
+                all_tables[table_name] = {
+                    "config": event_config,
+                    "type": "canonical_event",
+                    "name": event_name
+                }
+    
+    # Collect all tables from tables section
+    for table_name, table_config in config.get("tables", {}).items():
+        if table_name not in all_tables:
+            all_tables[table_name] = {
+                "config": table_config,
+                "type": "table",
+                "name": table_name
+            }
+    
+    if not all_tables:
+        print("WARNING: No tables found in config to validate")
+        return
+    
+    print(f"\nValidating {len(all_tables)} table(s)...\n")
+    
+    errors = []
+    
+    for table_name, table_info in all_tables.items():
+        table_config = table_info["config"]
+        config_type = table_info["type"]
+        display_name = table_info["name"]
+        
+        # Find the table directory/files
+        table_dir = omop_dir / table_name
+        parquet_files = []
+        
+        if table_dir.exists() and table_dir.is_dir():
+            parquet_files = list(table_dir.glob("*.parquet"))
+        
+        if not parquet_files:
+            errors.append(f"  ✗ Table '{table_name}': No Parquet files found in {table_dir}")
+            continue
+        
+        # Read schema from first parquet file
+        try:
+            sample_file = parquet_files[0]
+            df_schema = pl.scan_parquet(sample_file).schema
+            actual_columns = set(df_schema.keys())
+            
+            print(f"  Validating '{table_name}' ({len(parquet_files)} file(s))...")
+            
+            # Check subject_id field (canonical events use global primary_key)
+            if config_type == "canonical_event":
+                subject_id_field = config.get("primary_key")
+            else:
+                subject_id_field = table_config.get("subject_id_field")
+            
+            if subject_id_field and subject_id_field not in actual_columns:
+                errors.append(
+                    f"  ✗ Table '{table_name}': subject_id_field '{subject_id_field}' not found in data\n"
+                    f"    Available columns: {sorted(actual_columns)}"
+                )
+            
+            # Check datetime/time field (canonical events use "time_field", regular tables use "datetime_field")
+            if config_type == "canonical_event":
+                datetime_field = table_config.get("time_field")
+                time_fallbacks = table_config.get("time_fallbacks", [])
+            else:
+                datetime_field = table_config.get("datetime_field")
+                time_fallbacks = table_config.get("time_fallbacks", [])
+            
+            if datetime_field and datetime_field not in actual_columns:
+                errors.append(
+                    f"  ✗ Table '{table_name}': time/datetime field '{datetime_field}' not found in data\n"
+                    f"    Available columns: {sorted(actual_columns)}"
+                )
+            
+            # Check time_fallbacks fields (optional)
+            for fallback_field in time_fallbacks:
+                if fallback_field and fallback_field not in actual_columns:
+                    errors.append(
+                        f"  ✗ Table '{table_name}': time_fallback field '{fallback_field}' not found in data\n"
+                        f"    Available columns: {sorted(actual_columns)}"
+                    )
+            
+            # Check code mappings (for regular tables)
+            if config_type != "canonical_event":
+                code_mappings = table_config.get("code_mappings", {})
+                
+                # Check template mapping
+                if "template" in code_mappings:
+                    import re
+                    template = code_mappings["template"]
+                    if isinstance(template, dict):
+                        template_str = template.get("format", "")
+                    else:
+                        template_str = template
+                    
+                    # Extract field references from template
+                    field_refs = re.findall(r'\{([^}]+)\}', template_str)
+                    for field_ref in field_refs:
+                        if field_ref not in actual_columns:
+                            errors.append(
+                                f"  ✗ Table '{table_name}': template field '{field_ref}' not found in data\n"
+                                f"    Template: {template_str}\n"
+                                f"    Available columns: {sorted(actual_columns)}"
+                            )
+                
+                # Check source_value mapping
+                if "source_value" in code_mappings:
+                    source_value_field = code_mappings["source_value"].get("field")
+                    if source_value_field and source_value_field not in actual_columns:
+                        errors.append(
+                            f"  ✗ Table '{table_name}': source_value field '{source_value_field}' not found in data\n"
+                            f"    Available columns: {sorted(actual_columns)}"
+                        )
+                
+                # Check concept_id mapping
+                if "concept_id" in code_mappings:
+                    concept_id_config = code_mappings["concept_id"]
+                    concept_id_field = concept_id_config.get("concept_id_field")
+                    source_concept_id_field = concept_id_config.get("source_concept_id_field")
+                    
+                    if concept_id_field and concept_id_field not in actual_columns:
+                        errors.append(
+                            f"  ✗ Table '{table_name}': concept_id_field '{concept_id_field}' not found in data\n"
+                            f"    Available columns: {sorted(actual_columns)}"
+                        )
+                    
+                    if source_concept_id_field and source_concept_id_field not in actual_columns:
+                        errors.append(
+                            f"  ✗ Table '{table_name}': source_concept_id_field '{source_concept_id_field}' not found in data\n"
+                            f"    Available columns: {sorted(actual_columns)}"
+                        )
+            
+            # Check primary_key field
+            primary_key = table_config.get("primary_key")
+            if primary_key and primary_key not in actual_columns:
+                errors.append(
+                    f"  ✗ Table '{table_name}': primary_key '{primary_key}' not found in data\n"
+                    f"    Available columns: {sorted(actual_columns)}"
+                )
+            
+            # Check metadata fields
+            metadata_specs = table_config.get("metadata", [])
+            for meta_spec in metadata_specs:
+                meta_col = meta_spec["name"]
+                meta_type = meta_spec.get("type", "string").lower()
+                
+                if meta_col not in actual_columns:
+                    errors.append(
+                        f"  ✗ Table '{table_name}': metadata column '{meta_col}' not found in data\n"
+                        f"    Available columns: {sorted(actual_columns)}"
+                    )
+                    continue
+                
+                # Check type compatibility
+                actual_dtype = df_schema[meta_col]
+                expected_polars_type = config_type_to_polars(meta_type)
+                
+                # Type compatibility check (allow nullability, but check base type)
+                compatible = False
+                if meta_type in ["int", "integer", "int64"]:
+                    compatible = actual_dtype in [pl.Int64, pl.Int32, pl.Int16, pl.Int8, 
+                                                   pl.UInt64, pl.UInt32, pl.UInt16, pl.UInt8]
+                elif meta_type in ["float", "float64", "double"]:
+                    compatible = actual_dtype in [pl.Float64, pl.Float32]
+                elif meta_type in ["string", "str", "utf8"]:
+                    compatible = actual_dtype in [pl.Utf8, pl.Categorical]
+                elif meta_type in ["datetime", "timestamp"]:
+                    compatible = isinstance(actual_dtype, pl.Datetime) or actual_dtype == pl.Date
+                elif meta_type in ["date"]:
+                    compatible = actual_dtype == pl.Date or isinstance(actual_dtype, pl.Datetime)
+                elif meta_type in ["boolean", "bool"]:
+                    compatible = actual_dtype == pl.Boolean
+                else:
+                    # Unknown type, be permissive
+                    compatible = True
+                
+                if not compatible:
+                    errors.append(
+                        f"  ✗ Table '{table_name}': metadata column '{meta_col}' has type mismatch\n"
+                        f"    Expected: {meta_type} (Polars: {expected_polars_type})\n"
+                        f"    Actual: {actual_dtype}"
+                    )
+            
+            if not errors or not any(table_name in err for err in errors):
+                print(f"    ✓ Schema validated ({len(actual_columns)} columns)")
+        
+        except Exception as e:
+            errors.append(f"  ✗ Table '{table_name}': Failed to read schema from {sample_file}\n    Error: {e}")
+    
+    print()
+    
+    if errors:
+        print("=" * 80)
+        print("CONFIG VALIDATION FAILED")
+        print("=" * 80)
+        print("\nThe following errors were found:\n")
+        for error in errors:
+            print(error)
+        print("\n" + "=" * 80)
+        print("Please fix the config file and try again.")
+        print("=" * 80)
+        import sys
+        sys.exit(1)
+    else:
+        print("=" * 80)
+        print("✓ CONFIG VALIDATION PASSED")
+        print("=" * 80)
+        print()
 
 
 # ============================================================================
@@ -420,7 +653,7 @@ def fast_scan_file_for_concept_ids(file_path: Path, concept_id_columns: List[str
     return concept_ids
 
 
-def prescan_worker_v2(args: Tuple) -> Set[int]:
+def prescan_worker(args: Tuple) -> Set[int]:
     """
     Worker process to scan a batch of files for concept_ids.
 
@@ -438,7 +671,7 @@ def prescan_worker_v2(args: Tuple) -> Set[int]:
     return worker_concept_ids
 
 
-def prescan_concept_ids_v2(omop_dir: Path, config: Dict, num_workers: int, verbose: bool = True) -> Set[int]:
+def prescan_concept_ids(omop_dir: Path, config: Dict, num_workers: int, verbose: bool = True) -> Set[int]:
     """
     Fast parallel pre-scan to collect all unique concept_ids used in OMOP data.
 
@@ -512,7 +745,7 @@ def prescan_concept_ids_v2(omop_dir: Path, config: Dict, num_workers: int, verbo
     import multiprocessing as mp
 
     with mp.Pool(processes=num_workers) as pool:
-        worker_results = pool.map(prescan_worker_v2, worker_args)
+        worker_results = pool.map(prescan_worker, worker_args)
 
     # Merge results
     all_concept_ids = set()
@@ -557,498 +790,273 @@ def find_omop_table_files(omop_dir: Path, table_name: str) -> List[Path]:
     return files
 
 
-# Continued in next message...
-
-
 # ============================================================================
-# STAGE 1: TRANSFORMATION - OMOP → MEDS with Expanded Metadata
+# STAGE 1: TRANSFORMATION - Generic Table → MEDS (Schema-Agnostic)
 # ============================================================================
 
 
-def transform_omop_to_meds_v2(
+def transform_to_meds(
     df: pl.DataFrame,
-    table_name: str,
     table_config: Dict,
     primary_key: str,
-    code_mapping_type: str,
-    concept_map: Optional[Dict[int, str]],
     meds_schema: Dict[str, type],
-    col_types: Dict[str, str],
     concept_df: Optional[pl.DataFrame] = None,
+    fixed_code: Optional[str] = None,
+    table_name: Optional[str] = None,
 ) -> pl.DataFrame:
     """
-    Transform OMOP DataFrame to MEDS format with EXPANDED METADATA COLUMNS.
-
-    Key differences from v1:
-    - Returns subject_id (not person_id)
-    - Returns Datetime (not Int64 ms)
-    - Returns separate metadata columns (not JSON string)
-
+    Transform ANY tabular data to MEDS format (schema-agnostic).
+    
+    Assumptions:
+    - df is Parquet-backed (types are already correct)
+    - Column names are lowercase
+    - Config specifies extraction rules
+    
     Args:
-        df: Input OMOP DataFrame (lowercase columns)
-        table_name: OMOP table name
-        table_config: Table configuration
-        primary_key: Primary key column (person_id)
-        code_mapping_type: "source_value" or "concept_id"
-        concept_map: Concept mapping (if using concept_id)
-        meds_schema: Full MEDS schema with all columns
-        col_types: Metadata column type info from config
-
+        df: Input DataFrame
+        table_config: Table configuration from config file
+        primary_key: Primary key column name (e.g., "person_id")
+        meds_schema: Target MEDS schema (all columns with types)
+        concept_df: Optional concept lookup DataFrame (concept_id → concept_code)
+        fixed_code: Optional fixed code for canonical events (e.g., "MEDS_BIRTH")
+        table_name: Source table name (for metadata)
+    
     Returns:
-        MEDS DataFrame with all schema columns
+        MEDS DataFrame
     """
     pk_lower = primary_key.lower()
-
+    
+    # Early return if primary key missing
     if pk_lower not in df.columns:
         return pl.DataFrame(schema=meds_schema)
-
-    # ===== 1. Extract subject_id (rename from person_id) =====
-    # Double-cast: ensure string first, then to Int64 (handles mixed types safely)
-    subject_id_expr = pl.col(pk_lower).cast(pl.Utf8, strict=False).cast(pl.Int64, strict=False).alias("subject_id")
-
-    # ===== 2. Extract time as Datetime =====
+    
+    # Build all extraction expressions
+    select_exprs = []
+    
+    # 1. subject_id (rename from primary key)
+    select_exprs.append(pl.col(pk_lower).cast(pl.Int64).alias("subject_id"))
+    
+    # 2. time (with fallbacks)
     time_field = table_config.get("time_field", "").lower()
     time_fallbacks = [f.lower() for f in table_config.get("time_fallbacks", [])]
-
-    time_candidates = [time_field] + time_fallbacks
-    time_candidates = [c for c in time_candidates if c and c in df.columns]
-
+    time_candidates = [c for c in [time_field] + time_fallbacks if c and c in df.columns]
+    
     if not time_candidates:
         return pl.DataFrame(schema=meds_schema)
-
-    # Parse as datetime directly (Polars Datetime, not ms Int64!)
-    time_exprs = []
-    for col in time_candidates:
-        time_exprs.append(pl.col(col).str.to_datetime("%Y-%m-%d %H:%M:%S", strict=False, time_unit="us"))
-
-    time_expr = pl.coalesce(time_exprs).alias("time")
-
-    # ===== 3. Extract code =====
-    code_mappings = table_config.get("code_mappings", {})
-
-    if code_mapping_type == "source_value":
-        source_config = code_mappings.get("source_value", {})
-        code_field = source_config.get("field", "").lower()
-
-        if code_field and code_field in df.columns:
-            code_expr = pl.col(code_field).cast(pl.Utf8, strict=False).alias("code")
-        else:
-            code_expr = pl.lit(None).alias("code")
-
-    elif code_mapping_type == "concept_id":
-        # Map concept_id to concept_code using LEFT JOIN (fastest method!)
-        if concept_df is None:
-            raise ValueError("concept_id mapping requested but concept_df not provided")
-
-        concept_config = code_mappings.get("concept_id", {})
-        source_concept_id_field = concept_config.get("source_concept_id_field", "").lower()
-        concept_id_field = concept_config.get("concept_id_field", "").lower()
-        fallback_id = concept_config.get("fallback_concept_id")
-
-        # Try source_concept_id first, then concept_id
-        join_candidates = []
-        if source_concept_id_field and source_concept_id_field in df.columns:
-            join_candidates.append(source_concept_id_field)
-        if concept_id_field and concept_id_field in df.columns:
-            join_candidates.append(concept_id_field)
-
-        if join_candidates:
-            # Coalesce to get the best available concept_id (double-cast for safety)
-            concept_id_col = pl.coalesce(
-                [pl.col(c).cast(pl.Utf8, strict=False).cast(pl.Int64, strict=False) for c in join_candidates]
-            ).alias("_concept_id_join")
-            df = df.with_columns(concept_id_col)
-
-            # LEFT JOIN with pre-built concept DataFrame (FAST - only ~80ms per 100K rows!)
-            df = df.join(concept_df, left_on="_concept_id_join", right_on="concept_id", how="left")
-
-            # Drop temp column if it exists
-            if "_concept_id_join" in df.columns:
-                df = df.drop("_concept_id_join")
-
-            # Use the joined concept_code as code
-            code_expr = pl.col("concept_code").alias("code")
-
-            # Apply fallback for unmapped concepts
-            if fallback_id and fallback_id in concept_map:
-                code_expr = pl.coalesce([code_expr, pl.lit(concept_map[fallback_id])]).alias("code")
-        else:
-            code_expr = pl.lit(None).alias("code")
+    
+    # Coalesce time fields (cast to datetime if needed)
+    time_exprs = [pl.col(c).cast(pl.Datetime("us")) for c in time_candidates]
+    select_exprs.append(pl.coalesce(time_exprs).alias("time"))
+    
+    # 3. code (four strategies)
+    if fixed_code:
+        # Strategy A: Fixed code for canonical events
+        select_exprs.append(pl.lit(fixed_code).alias("code"))
     else:
-        code_expr = pl.lit(None).alias("code")
+        code_mappings = table_config.get("code_mappings", {})
+        
+        if "template" in code_mappings:
+            # Strategy B: Template-based code construction (vectorized string operations)
+            template = code_mappings["template"]
+            if isinstance(template, dict):
+                template_str = template.get("format", "")
+            else:
+                template_str = template
+            
+            # Parse template to extract field references: {field_name}
+            import re
+            field_refs = re.findall(r'\{([^}]+)\}', template_str)
+            
+            # Build code using Polars concat_str for performance
+            if field_refs:
+                # Split template into parts (literals and field references)
+                parts = re.split(r'(\{[^}]+\})', template_str)
+                
+                # Build list of expressions
+                concat_parts = []
+                for part in parts:
+                    if part.startswith('{') and part.endswith('}'):
+                        field_name = part[1:-1].lower()
+                        if field_name in df.columns:
+                            # Cast to string and handle nulls
+                            concat_parts.append(pl.col(field_name).cast(pl.Utf8).fill_null(""))
+                        else:
+                            # Missing field - use empty string
+                            concat_parts.append(pl.lit(""))
+                    elif part:
+                        # Literal string
+                        concat_parts.append(pl.lit(part))
+                
+                if concat_parts:
+                    code_expr = pl.concat_str(concat_parts)
+                    select_exprs.append(code_expr.alias("code"))
+                else:
+                    select_exprs.append(pl.lit(None, dtype=pl.Utf8).alias("code"))
+            else:
+                # No field references, just use literal
+                select_exprs.append(pl.lit(template_str).alias("code"))
+        
+        elif "source_value" in code_mappings:
+            # Strategy C: Direct field mapping
+            code_field = code_mappings["source_value"].get("field", "").lower()
+            if code_field and code_field in df.columns:
+                select_exprs.append(pl.col(code_field).cast(pl.Utf8).alias("code"))
+            else:
+                select_exprs.append(pl.lit(None, dtype=pl.Utf8).alias("code"))
+                
+        elif "concept_id" in code_mappings and concept_df is not None:
+            # Strategy D: Concept lookup via LEFT JOIN
+            concept_config = code_mappings["concept_id"]
+            source_cid_field = concept_config.get("source_concept_id_field", "").lower()
+            cid_field = concept_config.get("concept_id_field", "").lower()
+            
+            # Coalesce: prefer source_concept_id, fallback to concept_id
+            join_candidates = [c for c in [source_cid_field, cid_field] if c and c in df.columns]
+            
+            if join_candidates:
+                cid_exprs = [pl.col(c).cast(pl.Int64) for c in join_candidates]
+                df = df.with_columns(pl.coalesce(cid_exprs).alias("_cid"))
+                
+                # LEFT JOIN concept lookup
+                df = df.join(concept_df, left_on="_cid", right_on="concept_id", how="left")
+                select_exprs.append(pl.col("concept_code").alias("code"))
+            else:
+                select_exprs.append(pl.lit(None, dtype=pl.Utf8).alias("code"))
+        else:
+            select_exprs.append(pl.lit(None, dtype=pl.Utf8).alias("code"))
 
-    # ===== 4. Extract numeric_value =====
+    # 4. numeric_value
     numeric_field = table_config.get("numeric_value_field", "").lower()
     if numeric_field and numeric_field in df.columns:
-        # Double-cast: ensure string first, then to Float32 (handles mixed types like "%")
-        numeric_expr = (
-            pl.col(numeric_field).cast(pl.Utf8, strict=False).cast(pl.Float32, strict=False).alias("numeric_value")
-        )
+        select_exprs.append(pl.col(numeric_field).cast(pl.Float32).alias("numeric_value"))
     else:
-        numeric_expr = pl.lit(None, dtype=pl.Float32).alias("numeric_value")
-
-    # ===== 5. Extract text_value =====
+        select_exprs.append(pl.lit(None, dtype=pl.Float32).alias("numeric_value"))
+    
+    # 5. text_value
     text_field = table_config.get("text_value_field", "").lower()
     if text_field and text_field in df.columns:
-        # Ensure string type (should already be string from CSV, but be explicit)
-        text_expr = pl.col(text_field).cast(pl.Utf8, strict=False).alias("text_value")
+        select_exprs.append(pl.col(text_field).cast(pl.Utf8).alias("text_value"))
     else:
-        text_expr = pl.lit(None, dtype=pl.Utf8).alias("text_value")
-
-    # ===== 6. Extract METADATA as SEPARATE COLUMNS =====
-    metadata_exprs = []
-
-    # Always add 'table' column
-    metadata_exprs.append(pl.lit(table_name).alias("table"))
-
-    # Add 'end' column (from time_end_field)
+        select_exprs.append(pl.lit(None, dtype=pl.Utf8).alias("text_value"))
+    
+    # 6. Metadata columns
+    # Always add 'table'
+    select_exprs.append(pl.lit(table_name or "unknown").alias("table"))
+    
+    # Add 'end' (time_end_field)
     time_end_field = table_config.get("time_end_field", "").lower()
     if time_end_field and time_end_field in df.columns:
-        end_expr = (
-            pl.col(time_end_field).str.to_datetime("%Y-%m-%d %H:%M:%S", strict=False, time_unit="us").alias("end")
-        )
+        select_exprs.append(pl.col(time_end_field).cast(pl.Datetime("us")).alias("end"))
     else:
-        end_expr = pl.lit(None, dtype=pl.Datetime("us")).alias("end")
-    metadata_exprs.append(end_expr)
-
-    # Add configured metadata fields as separate columns
+        select_exprs.append(pl.lit(None, dtype=pl.Datetime("us")).alias("end"))
+    
+    # Add configured metadata fields
     for meta_spec in table_config.get("metadata", []):
-        meta_name_orig = meta_spec["name"].lower()
-        meta_name_meds = COLUMN_RENAME_MAP.get(meta_spec["name"], meta_spec["name"])
-        meta_type = meta_spec.get("type", "string")
-
-        if meta_name_orig in df.columns:
-            # IMPORTANT: Force to string FIRST, then cast to target type
-            # This prevents Polars from inferring numeric types and failing on "%" etc.
-            if meta_type == "int":
-                meta_expr = pl.col(meta_name_orig).cast(pl.Utf8, strict=False).cast(pl.Int64, strict=False)
-            elif meta_type == "float":
-                meta_expr = pl.col(meta_name_orig).cast(pl.Utf8, strict=False).cast(pl.Float64, strict=False)
-            else:
-                # Already string, but ensure it
-                meta_expr = pl.col(meta_name_orig).cast(pl.Utf8, strict=False)
-
-            metadata_exprs.append(meta_expr.alias(meta_name_meds))
-
-    # ===== 7. Build result with ALL schema columns =====
-    select_exprs = [
-        subject_id_expr,
-        time_expr,
-        code_expr,
-        numeric_expr,
-        text_expr,
-    ] + metadata_exprs
-
-    result_df = df.select(select_exprs)
-
-    # ===== 8. Ensure ALL schema columns exist (fill missing with nulls) =====
+        meta_col = meta_spec["name"].lower()
+        meta_name = COLUMN_RENAME_MAP.get(meta_spec["name"], meta_spec["name"])
+        
+        if meta_col in df.columns:
+            meta_type = config_type_to_polars(meta_spec.get("type", "string"))
+            select_exprs.append(pl.col(meta_col).cast(meta_type).alias(meta_name))
+    
+    # Execute transformation
+    result = df.select(select_exprs)
+    
+    # Fill missing schema columns with nulls
     for col_name, col_type in meds_schema.items():
-        if col_name not in result_df.columns:
-            result_df = result_df.with_columns(pl.lit(None).cast(col_type).alias(col_name))
+        if col_name not in result.columns:
+            result = result.with_columns(pl.lit(None).cast(col_type).alias(col_name))
+    
+    # Reorder to match schema and enforce types
+    result = result.select([pl.col(c).cast(meds_schema[c]) for c in meds_schema.keys()])
+    
+    # Filter: require subject_id, time, and code
+    result = result.filter(
+        pl.col("subject_id").is_not_null() 
+        & pl.col("time").is_not_null() 
+        & pl.col("code").is_not_null()
+    )
+    
+    return result
 
-    # Reorder to match schema
-    result_df = result_df.select(list(meds_schema.keys()))
 
-    # ===== 9. FORCE final schema enforcement (prevents serialization errors) =====
-    # Re-cast ALL columns one more time to ensure exact schema match
-    final_cast_exprs = [pl.col(col_name).cast(col_type, strict=False) for col_name, col_type in meds_schema.items()]
-    result_df = result_df.select(final_cast_exprs)
-
-    return result_df
-
-
-def transform_canonical_event_v2(
-    df: pl.DataFrame,
-    event_name: str,
-    event_config: Dict,
-    primary_key: str,
-    meds_schema: Dict[str, type],
-    col_types: Dict[str, str],
-) -> pl.DataFrame:
+def hash_subject_id_vectorized(subject_ids: pl.Series, num_shards: int) -> pl.Series:
     """
-    Transform OMOP DataFrame to canonical MEDS event with expanded metadata.
-
-    Similar to regular transform but uses fixed code from config.
+    Vectorized hash partitioning using Polars.
+    
+    Much faster than row-by-row Python hashing.
     """
-    pk_lower = primary_key.lower()
-
-    if pk_lower not in df.columns:
-        return pl.DataFrame(schema=meds_schema)
-
-    # subject_id (double-cast for safety)
-    subject_id_expr = pl.col(pk_lower).cast(pl.Utf8, strict=False).cast(pl.Int64, strict=False).alias("subject_id")
-
-    # code (from config)
-    code = event_config.get("code", f"MEDS_{event_name.upper()}")
-    code_expr = pl.lit(code).alias("code")
-
-    # time
-    time_field = event_config.get("time_field", "").lower()
-    time_fallbacks = [f.lower() for f in event_config.get("time_fallbacks", [])]
-
-    time_candidates = [time_field] + time_fallbacks
-    time_candidates = [c for c in time_candidates if c and c in df.columns]
-
-    if not time_candidates:
-        return pl.DataFrame(schema=meds_schema)
-
-    time_exprs = []
-    for col in time_candidates:
-        time_exprs.append(pl.col(col).str.to_datetime("%Y-%m-%d %H:%M:%S", strict=False, time_unit="us"))
-
-    time_expr = pl.coalesce(time_exprs).alias("time")
-
-    # numeric_value and text_value (null for canonical events)
-    numeric_expr = pl.lit(None, dtype=pl.Float32).alias("numeric_value")
-    text_expr = pl.lit(None, dtype=pl.Utf8).alias("text_value")
-
-    # Metadata
-    metadata_exprs = []
-    metadata_exprs.append(pl.lit(event_config.get("table", event_name)).alias("table"))
-    metadata_exprs.append(pl.lit(None, dtype=pl.Datetime("us")).alias("end"))
-
-    for meta_spec in event_config.get("metadata", []):
-        meta_name_orig = meta_spec["name"].lower()
-        meta_name_meds = COLUMN_RENAME_MAP.get(meta_spec["name"], meta_spec["name"])
-        meta_type = meta_spec.get("type", "string")
-
-        if meta_name_orig in df.columns:
-            # IMPORTANT: Force to string FIRST, then cast to target type
-            # This prevents Polars from inferring numeric types and failing on "%" etc.
-            if meta_type == "int":
-                meta_expr = pl.col(meta_name_orig).cast(pl.Utf8, strict=False).cast(pl.Int64, strict=False)
-            elif meta_type == "float":
-                meta_expr = pl.col(meta_name_orig).cast(pl.Utf8, strict=False).cast(pl.Float64, strict=False)
-            else:
-                # Already string, but ensure it
-                meta_expr = pl.col(meta_name_orig).cast(pl.Utf8, strict=False)
-
-            metadata_exprs.append(meta_expr.alias(meta_name_meds))
-
-    select_exprs = [
-        subject_id_expr,
-        time_expr,
-        code_expr,
-        numeric_expr,
-        text_expr,
-    ] + metadata_exprs
-
-    result_df = df.select(select_exprs)
-
-    # Fill missing schema columns
-    for col_name, col_type in meds_schema.items():
-        if col_name not in result_df.columns:
-            result_df = result_df.with_columns(pl.lit(None).cast(col_type).alias(col_name))
-
-    result_df = result_df.select(list(meds_schema.keys()))
-
-    # FORCE final schema enforcement (prevents serialization errors)
-    final_cast_exprs = [pl.col(col_name).cast(col_type, strict=False) for col_name, col_type in meds_schema.items()]
-    result_df = result_df.select(final_cast_exprs)
-
-    return result_df
+    return subject_ids.hash(seed=0) % num_shards
 
 
-def process_omop_file_v2(
+def process_file(
     file_path: Path,
-    table_name: str,
     table_config: Dict,
     primary_key: str,
-    code_mapping_type: str,
-    concept_map: Optional[Dict[int, str]],
     meds_schema: Dict[str, type],
-    col_types: Dict[str, str],
-    is_canonical: bool = False,
-    canonical_event_name: str = None,
-    chunk_size: int = 100_000,
     concept_df: Optional[pl.DataFrame] = None,
-) -> Tuple[List[Dict[str, Any]], int, int]:
+    fixed_code: Optional[str] = None,
+    table_name: Optional[str] = None,
+) -> pl.DataFrame:
     """
-    Process OMOP file and extract MEDS events with expanded metadata.
-
-    Uses streaming/chunked processing.
-
+    Process a Parquet file and transform to MEDS format.
+    
+    Simplified: No CSV support, no chunking, no dict serialization.
+    Just: read Parquet → transform → return DataFrame.
+    
+    Args:
+        file_path: Path to Parquet file
+        table_config: Table configuration
+        primary_key: Primary key column name
+        meds_schema: Target MEDS schema
+        concept_df: Optional concept lookup DataFrame
+        fixed_code: Optional fixed code for canonical events
+        table_name: Source table name
+    
     Returns:
-        Tuple of (events list, total_rows_input, total_rows_filtered)
+        MEDS DataFrame
     """
-    all_events = []
-    total_rows_before_filter = 0
-    total_rows_after_filter = 0
-
     try:
-        if str(file_path).endswith(".parquet"):
-            lazy_df = pl.scan_parquet(file_path)
-            lazy_df = lazy_df.rename({c: c.lower() for c in lazy_df.columns})
-
-            df = lazy_df.collect(streaming=True)
-
-            # CRITICAL: Force ALL columns to string type immediately after read
-            # This prevents Polars from using inferred types that cause "%" errors
-            string_cast_exprs = [pl.col(c).cast(pl.Utf8, strict=False) for c in df.columns]
-            df = df.select(string_cast_exprs)
-
-            total_rows = len(df)
-            for start_idx in range(0, total_rows, chunk_size):
-                end_idx = min(start_idx + chunk_size, total_rows)
-                chunk_df = df.slice(start_idx, end_idx - start_idx)
-
-                if is_canonical:
-                    transformed = transform_canonical_event_v2(
-                        chunk_df, canonical_event_name, table_config, primary_key, meds_schema, col_types
-                    )
-                else:
-                    transformed = transform_omop_to_meds_v2(
-                        chunk_df,
-                        table_name,
-                        table_config,
-                        primary_key,
-                        code_mapping_type,
-                        concept_map,
-                        meds_schema,
-                        col_types,
-                        concept_df,
-                    )
-
-                rows_before_filter = len(transformed)
-
-                transformed = transformed.filter(
-                    pl.col("subject_id").is_not_null() & pl.col("time").is_not_null() & pl.col("code").is_not_null()
-                )
-
-                rows_after_filter = len(transformed)
-
-                total_rows_before_filter += rows_before_filter
-                total_rows_after_filter += rows_after_filter
-
-                # Force all columns to match schema types before to_dicts() (fixes mixed-type serialization errors)
-                cast_exprs = []
-                for col_name in transformed.columns:
-                    if col_name in meds_schema:
-                        cast_exprs.append(pl.col(col_name).cast(meds_schema[col_name], strict=False))
-                    else:
-                        cast_exprs.append(pl.col(col_name))
-
-                if cast_exprs:
-                    transformed = transformed.select(cast_exprs)
-
-                # DEBUG: Try to serialize and catch which column fails
-                try:
-                    all_events.extend(transformed.to_dicts())
-                except Exception as dict_err:
-                    print(f"\n!!! ERROR during to_dicts() for {file_path}")
-                    print(f"    Table: {table_name}, Chunk rows: {len(transformed)}")
-                    print(f"    Schema: {transformed.schema}")
-                    print(f"    Error: {dict_err}")
-                    # Try to identify problematic column
-                    for col in transformed.columns:
-                        try:
-                            _ = transformed.select([col]).to_dicts()
-                        except Exception as col_err:
-                            print(f"    ❌ Column '{col}' fails: {col_err}")
-                    raise
-        else:
-            # Read CSV with NO schema inference - force everything to strings
-            # schema_overrides with Utf8 for all columns prevents type inference errors
-            reader = pl.read_csv_batched(
-                file_path,
-                infer_schema_length=0,  # Don't infer types
-                batch_size=chunk_size,
-                try_parse_dates=False,  # Don't auto-parse dates
-            )
-
-            while True:
-                batch = reader.next_batches(1)
-                if batch is None or len(batch) == 0:
-                    break
-
-                chunk_df = batch[0]
-
-                # CRITICAL: Force ALL columns to string type immediately after read
-                # This prevents Polars from using inferred types that cause "%" errors
-                string_cast_exprs = [pl.col(c).cast(pl.Utf8, strict=False) for c in chunk_df.columns]
-                chunk_df = chunk_df.select(string_cast_exprs)
-
-                chunk_df = chunk_df.rename({c: c.lower() for c in chunk_df.columns})
-
-                if is_canonical:
-                    transformed = transform_canonical_event_v2(
-                        chunk_df, canonical_event_name, table_config, primary_key, meds_schema, col_types
-                    )
-                else:
-                    transformed = transform_omop_to_meds_v2(
-                        chunk_df,
-                        table_name,
-                        table_config,
-                        primary_key,
-                        code_mapping_type,
-                        concept_map,
-                        meds_schema,
-                        col_types,
-                        concept_df,
-                    )
-
-                rows_before_filter = len(transformed)
-
-                transformed = transformed.filter(
-                    pl.col("subject_id").is_not_null() & pl.col("time").is_not_null() & pl.col("code").is_not_null()
-                )
-
-                rows_after_filter = len(transformed)
-
-                total_rows_before_filter += rows_before_filter
-                total_rows_after_filter += rows_after_filter
-
-                # Force all columns to match schema types before to_dicts() (fixes mixed-type serialization errors)
-                cast_exprs = []
-                for col_name in transformed.columns:
-                    if col_name in meds_schema:
-                        cast_exprs.append(pl.col(col_name).cast(meds_schema[col_name], strict=False))
-                    else:
-                        cast_exprs.append(pl.col(col_name))
-
-                if cast_exprs:
-                    transformed = transformed.select(cast_exprs)
-
-                # DEBUG: Try to serialize and catch which column fails
-                try:
-                    all_events.extend(transformed.to_dicts())
-                except Exception as dict_err:
-                    print(f"\n!!! ERROR during to_dicts() for {file_path}")
-                    print(f"    Table: {table_name}, Chunk rows: {len(transformed)}")
-                    print(f"    Schema: {transformed.schema}")
-                    print(f"    Error: {dict_err}")
-                    # Try to identify problematic column
-                    for col in transformed.columns:
-                        try:
-                            _ = transformed.select([col]).to_dicts()
-                        except Exception as col_err:
-                            print(f"    ❌ Column '{col}' fails: {col_err}")
-                    raise
-
+        # Read Parquet file (lazy scan)
+        df = pl.scan_parquet(file_path).collect(streaming=True)
+        
+        # Normalize column names to lowercase
+        df = df.rename({c: c.lower() for c in df.columns})
+        
+        # Transform to MEDS format
+        result = transform_to_meds(
+            df=df,
+            table_config=table_config,
+            primary_key=primary_key,
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            fixed_code=fixed_code,
+            table_name=table_name,
+        )
+        
+        return result
+        
     except Exception as e:
-        print(f"\nERROR processing {file_path}")
-        print(f"  Table: {table_name}")
-        print(f"  Error: {e}")
+        print(f"\nERROR processing {file_path}: {e}")
         import traceback
-
-        print("  Traceback:")
         traceback.print_exc()
-        return [], 0, 0
-
-    return all_events, total_rows_before_filter, total_rows_before_filter - total_rows_after_filter
-
-
-# Continued with Stage 1 partitioning, Stage 2 merging, and main() ...
-# (Similar structure to v1 but using meds_schema throughout)
+        return pl.DataFrame(schema=meds_schema)
 
 
 # ============================================================================
-# STAGE 1: PARTITION (same as v1 but with new schema)
+# STAGE 1: PARTITION
 # ============================================================================
 
 
-def partition_worker_v2(args: Tuple) -> Dict:
-    """Worker for Stage 1 - partition into shards with MEDS schema."""
+def partition_worker(args: Tuple) -> Dict:
+    """
+    Worker for Stage 1 - partition into shards using DataFrame accumulation.
+    
+    Key improvements:
+    - No dict serialization (keep DataFrames)
+    - Vectorized hash partitioning
+    - Memory-conscious buffering with total row tracking
+    """
     (
         worker_id,
         file_batch,
@@ -1056,76 +1064,111 @@ def partition_worker_v2(args: Tuple) -> Dict:
         num_shards,
         rows_per_run,
         temp_dir,
-        code_mapping_type,
-        concept_map,
-        chunk_size,
         compression,
         meds_schema,
-        col_types,
         concept_df,
         progress_counter,
     ) = args
 
     start_time = time.time()
-
+    
+    # Buffers: Dict[shard_id, List[DataFrame]]
     shard_buffers = {i: [] for i in range(num_shards)}
+    shard_row_counts = {i: 0 for i in range(num_shards)}
+    
     run_sequence = 0
     rows_processed = 0
-    rows_input = 0  # Total rows read from source
-    rows_filtered = 0  # Rows dropped (null subject_id, time, or code)
     files_processed = 0
+    total_buffered_rows = 0  # Track total across all shards
 
     primary_key = config["primary_key"]
 
-    # concept_df is passed from main process (shared via copy-on-write on Unix/Mac)
-    # No memory duplication across workers!
-
     for table_name, file_path, table_config, is_canonical, event_name in file_batch:
+        file_start_time = time.time()
+        
         try:
-            events, file_rows_input, file_rows_filtered = process_omop_file_v2(
-                file_path,
-                table_name,
-                table_config,
-                primary_key,
-                code_mapping_type,
-                concept_map,
-                meds_schema,
-                col_types,
-                is_canonical,
-                event_name,
-                chunk_size,
-                concept_df,
+            # Determine fixed_code for canonical events
+            fixed_code = None
+            if is_canonical:
+                fixed_code = table_config.get("code", f"MEDS_{event_name.upper()}")
+            
+            # Process file
+            df = process_file(
+                file_path=file_path,
+                table_config=table_config,
+                primary_key=primary_key,
+                meds_schema=meds_schema,
+                concept_df=concept_df,
+                fixed_code=fixed_code,
+                table_name=table_name,
             )
-
-            # Track input vs output
-            rows_input += file_rows_input
-            rows_filtered += file_rows_filtered
-
-            for event in events:
-                shard_id = hash_subject_id(event["subject_id"], num_shards)
-                shard_buffers[shard_id].append(event)
-                rows_processed += 1
-
-                if len(shard_buffers[shard_id]) >= rows_per_run:
-                    write_shard_run_v2(
-                        shard_id, shard_buffers[shard_id], temp_dir, worker_id, run_sequence, meds_schema, compression
-                    )
-                    shard_buffers[shard_id] = []
-                    run_sequence += 1
-
+            
+            if len(df) == 0:
+                continue
+            
+            rows_processed += len(df)
+            
+            # Hash partitioning (efficient single-pass)
+            df = df.with_columns(
+                hash_subject_id_vectorized(pl.col("subject_id"), num_shards).alias("_shard_id")
+            )
+            
+            # Efficient partitioning: group by shard_id in ONE pass (not N filters!)
+            for shard_id, shard_df in df.group_by("_shard_id", maintain_order=False):
+                shard_id_value = shard_id[0]  # Extract scalar from tuple
+                shard_df = shard_df.drop("_shard_id")
+                
+                shard_buffers[shard_id_value].append(shard_df)
+                shard_row_counts[shard_id_value] += len(shard_df)
+                total_buffered_rows += len(shard_df)
+            
+            # Flush if TOTAL buffered rows exceed threshold
+            if total_buffered_rows >= rows_per_run:
+                for shard_id, buffer in shard_buffers.items():
+                    if buffer:
+                        flush_shard_buffer(
+                            shard_id, 
+                            buffer, 
+                            temp_dir, 
+                            worker_id, 
+                            run_sequence, 
+                            meds_schema, 
+                            compression
+                        )
+                        shard_buffers[shard_id] = []
+                        shard_row_counts[shard_id] = 0
+                run_sequence += 1
+                total_buffered_rows = 0
+            
             files_processed += 1
+                
         except Exception as e:
-            print(f"ERROR in worker {worker_id} processing {file_path}: {e}")
+            if TQDM_AVAILABLE:
+                tqdm.write(f"\nERROR in worker {worker_id} processing {file_path}: {e}")
+            else:
+                print(f"\nERROR in worker {worker_id} processing {file_path}: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
-            # ALWAYS increment progress counter, even on error
+            # ALWAYS increment progress counter
             if progress_counter is not None:
-                # Manager.Value doesn't need get_lock() - it's automatically thread-safe
-                progress_counter.value += 1
+                try:
+                    progress_counter.value += 1
+                except:
+                    pass  # Ignore errors from progress counter
 
+    # Flush remaining buffers
     for shard_id, buffer in shard_buffers.items():
         if buffer:
-            write_shard_run_v2(shard_id, buffer, temp_dir, worker_id, run_sequence, meds_schema, compression)
-            run_sequence += 1
+            flush_shard_buffer(
+                shard_id, 
+                buffer, 
+                temp_dir, 
+                worker_id, 
+                run_sequence, 
+                meds_schema, 
+                compression
+            )
 
     elapsed = time.time() - start_time
 
@@ -1133,70 +1176,37 @@ def partition_worker_v2(args: Tuple) -> Dict:
         "worker_id": worker_id,
         "files_processed": files_processed,
         "rows_processed": rows_processed,
-        "rows_input": rows_input,
-        "rows_filtered": rows_filtered,
         "elapsed_sec": elapsed,
     }
 
 
-def normalize_events_to_schema(events: List[Dict], meds_schema: Dict[str, type]) -> List[Dict]:
-    """
-    Normalize event dicts to match schema (ensures all keys exist, pre-casts problematic types).
-
-    This is CRITICAL for fast DataFrame creation:
-    1. Ensures every dict has the same keys (prevents schema inference issues)
-    2. Pre-casts string columns to prevent type conflicts
-
-    Performance: O(n*m) where n=events, m=schema_cols, but very fast in practice.
-    """
-    if not events:
-        return events
-
-    # Identify string columns (most likely to have mixed types)
-    string_cols = {col for col, dtype in meds_schema.items() if dtype == pl.Utf8}
-
-    # Normalize each event
-    for event in events:
-        # 1. Fill missing keys with None (ensures all dicts have same structure)
-        for col_name in meds_schema:
-            if col_name not in event:
-                event[col_name] = None
-
-        # 2. Pre-cast string columns to str (prevents "%" errors)
-        for col_name in string_cols:
-            value = event.get(col_name)
-            if value is not None and not isinstance(value, str):
-                event[col_name] = str(value)
-
-    return events
-
-
-def write_shard_run_v2(
+def flush_shard_buffer(
     shard_id: int,
-    events: List[Dict],
+    dataframes: List[pl.DataFrame],
     temp_dir: Path,
     worker_id: int,
     run_seq: int,
     meds_schema: Dict[str, type],
     compression: str = "lz4",
 ):
-    """Write sorted run with MEDS schema (expanded metadata columns)."""
-    if not events:
+    """
+    Flush shard buffer: concat DataFrames, sort, and write to disk.
+    
+    Memory-efficient: concatenates and immediately writes, no dict overhead.
+    """
+    if not dataframes:
         return
 
     shard_dir = temp_dir / f"shard={shard_id}"
     shard_dir.mkdir(parents=True, exist_ok=True)
 
-    # Normalize dicts: fill missing keys + pre-cast strings (prevents type inference errors)
-    events = normalize_events_to_schema(events, meds_schema)
-
-    # Create DataFrame WITH explicit schema_overrides
-    # All dicts now have same keys, so Polars can build fast without full scan
-    df = pl.DataFrame(events, schema_overrides=meds_schema)
+    # Concatenate all DataFrames in buffer
+    df = pl.concat(dataframes, rechunk=True)
 
     # Sort by (subject_id, time)
     df = df.sort(["subject_id", "time"])
 
+    # Write to Parquet
     output_file = shard_dir / f"run-worker{worker_id}-{run_seq}.parquet"
     df.write_parquet(output_file, compression=compression)
 
@@ -1206,7 +1216,7 @@ def write_shard_run_v2(
 # ============================================================================
 
 
-class ParquetRunIteratorV2:
+class ParquetRunIterator:
     """Streaming iterator for k-way merge."""
 
     def __init__(self, file_path: Path, batch_size: int = 50000):
@@ -1248,7 +1258,7 @@ class ParquetRunIteratorV2:
         return row
 
 
-def kway_merge_shard_v2(
+def kway_merge_shard(
     run_files: List[Path],
     output_file: Path,
     batch_size: int,
@@ -1265,7 +1275,7 @@ def kway_merge_shard_v2(
     heap = []
     for i, file_path in enumerate(run_files):
         try:
-            it = ParquetRunIteratorV2(file_path, batch_size=50000)
+            it = ParquetRunIterator(file_path, batch_size=50000)
             first_row = next(it)
             # Sort by (subject_id, time) - both are comparable
             sort_key = (first_row["subject_id"], first_row["time"])
@@ -1283,11 +1293,8 @@ def kway_merge_shard_v2(
         total_rows += 1
 
         if len(batch) >= batch_size:
-            # Normalize batch to match schema
-            batch = normalize_events_to_schema(batch, meds_schema)
-
             if writer is None:
-                # Create DataFrame WITH explicit schema_overrides (fast - all dicts have same keys)
+                # Create DataFrame WITH explicit schema_overrides
                 df = pl.DataFrame(batch, schema_overrides=meds_schema)
                 schema_pa = df.to_arrow().schema
                 writer = pq.ParquetWriter(output_file, schema_pa, compression=compression)
@@ -1307,10 +1314,7 @@ def kway_merge_shard_v2(
             pass
 
     if batch:
-        # Normalize final batch to match schema
-        batch = normalize_events_to_schema(batch, meds_schema)
-
-        # Create DataFrame for final batch WITH explicit schema_overrides (fast - all dicts have same keys)
+        # Create DataFrame for final batch WITH explicit schema_overrides
         df = pl.DataFrame(batch, schema_overrides=meds_schema)
 
         if writer is None:
@@ -1325,7 +1329,7 @@ def kway_merge_shard_v2(
     return total_rows
 
 
-def merge_worker_v2(args: Tuple) -> Dict:
+def merge_worker(args: Tuple) -> Dict:
     """Worker for Stage 2 - merge runs for a shard."""
     shard_id, temp_dir, output_dir, batch_size, meds_schema, compression = args
 
@@ -1343,7 +1347,7 @@ def merge_worker_v2(args: Tuple) -> Dict:
     output_shard_dir.mkdir(parents=True, exist_ok=True)
     output_file = output_shard_dir / "part-0000.parquet"
 
-    row_count = kway_merge_shard_v2(run_files, output_file, batch_size, meds_schema, compression)
+    row_count = kway_merge_shard(run_files, output_file, batch_size, meds_schema, compression)
 
     elapsed = time.time() - start_time
 
@@ -1355,32 +1359,101 @@ def merge_worker_v2(args: Tuple) -> Dict:
 # ============================================================================
 
 
-def discover_omop_files(omop_dir: Path, config: Dict, code_mapping_type: str) -> List[Tuple]:
-    """Discover OMOP files to process."""
+def discover_omop_files(omop_dir: Path, config: Dict, code_mapping_type: str, strict: bool = True) -> List[Tuple]:
+    """
+    Discover OMOP files to process.
+    
+    Args:
+        omop_dir: Root directory containing OMOP data
+        config: ETL configuration
+        code_mapping_type: Preferred code mapping type (source_value or concept_id)
+        strict: If True, error on missing tables or incompatible mappings; if False, warn and skip
+    
+    Returns:
+        List of tuples: (table_name, file_path, table_config, is_canonical, event_name)
+    """
     files = []
+    errors = []
 
     for event_name, event_config in config.get("canonical_events", {}).items():
         table_name = event_config["table"]
         table_files = find_omop_table_files(omop_dir, table_name)
+        
+        if not table_files:
+            msg = f"Table '{table_name}' (canonical event '{event_name}'): No Parquet files found"
+            if strict:
+                errors.append(msg)
+            else:
+                print(f"WARNING: {msg}, skipping")
+            continue
 
         for file_path in table_files:
             files.append((table_name, file_path, event_config, True, event_name))
 
     for table_name, table_config in config.get("tables", {}).items():
         code_mappings = table_config.get("code_mappings", {})
-        if code_mapping_type not in code_mappings:
-            print(f"WARNING: Table '{table_name}' does not have '{code_mapping_type}' mapping, skipping")
+        
+        # Check if table has ANY valid code mapping
+        has_template = "template" in code_mappings
+        has_source_value = "source_value" in code_mappings
+        has_concept_id = "concept_id" in code_mappings
+        has_requested_mapping = code_mapping_type in code_mappings
+        
+        # If table has no mappings at all, skip/error
+        if not (has_template or has_source_value or has_concept_id):
+            msg = f"Table '{table_name}': No code mappings defined (template, source_value, or concept_id)"
+            if strict:
+                errors.append(msg)
+            else:
+                print(f"WARNING: {msg}, skipping")
             continue
-
+        
+        # If concept_id mapping requested but not available, check if we have alternatives
+        if code_mapping_type == "concept_id" and not has_concept_id:
+            # Template or source_value can work without concept_id mapping
+            if not (has_template or has_source_value):
+                msg = f"Table '{table_name}': Does not have '{code_mapping_type}' mapping and no alternative (template/source_value)"
+                if strict:
+                    errors.append(msg)
+                else:
+                    print(f"WARNING: {msg}, skipping")
+                continue
+            else:
+                # Has alternative mapping, use it
+                if not strict:
+                    print(f"INFO: Table '{table_name}' using alternative mapping (no concept_id available)")
+        
+        # Check if files exist
         table_files = find_omop_table_files(omop_dir, table_name)
+        if not table_files:
+            msg = f"Table '{table_name}': No Parquet files found"
+            if strict:
+                errors.append(msg)
+            else:
+                print(f"WARNING: {msg}, skipping")
+            continue
 
         for file_path in table_files:
             files.append((table_name, file_path, table_config, False, None))
+    
+    # If strict mode and errors found, exit
+    if strict and errors:
+        print("\n" + "=" * 80)
+        print("STRICT MODE: PIPELINE CANNOT PROCEED")
+        print("=" * 80)
+        print("\nThe following errors were found:\n")
+        for error in errors:
+            print(f"  ✗ {error}")
+        print("\n" + "=" * 80)
+        print("Fix the config or data directory, or run with --no-strict to skip problematic tables.")
+        print("=" * 80)
+        import sys
+        sys.exit(1)
 
     return files
 
 
-def run_pipeline_v2(
+def run_pipeline(
     omop_dir: Path,
     output_dir: Path,
     config: Dict,
@@ -1392,14 +1465,27 @@ def run_pipeline_v2(
     verbose: bool,
     polars_threads: Optional[int],
     memory_limit_mb: Optional[int],
-    chunk_size: Optional[int],
     compression: str,
     optimize_concepts: bool = True,
+    skip_merge: bool = False,
+    strict: bool = True,
 ):
-    """Run ETL pipeline v2 with MEDS schema."""
+    """
+    Run ETL pipeline with refactored DataFrame-based processing.
+    
+    Key improvements:
+    - DataFrame accumulation (no dict serialization)
+    - Vectorized hash partitioning
+    - Simplified code (schema-agnostic)
+    
+    Args:
+        strict: If True (default), exit on missing tables or invalid config; if False, warn and skip
+    """
+    # Validate config against actual data schema FIRST
+    validate_config_against_data(omop_dir, config)
+    
     # Build MEDS schema from config
     meds_schema = get_meds_schema_from_config(config)
-    col_types = get_metadata_column_info(config)
 
     print(f"\n=== MEDS SCHEMA ===")
     print(f"Core columns: subject_id, time, code, numeric_value, text_value")
@@ -1413,26 +1499,43 @@ def run_pipeline_v2(
 
     os.environ["POLARS_MAX_THREADS"] = str(polars_threads)
 
-    # Memory auto-tuning (same as v1)
+    # Memory auto-tuning
+    print(f"\n=== MEMORY CONFIGURATION ===")
     if memory_limit_mb:
-        available_mb = memory_limit_mb * 0.7
-        bytes_per_row = 1000
-        total_rows_budget = int((available_mb * 1024 * 1024) / bytes_per_row)
+        print(f"Memory limit specified: {memory_limit_mb} MB (total system memory)")
+        print(f"Number of workers: {num_workers}")
+        
+        # Calculate per-worker memory budget
+        per_worker_mb = memory_limit_mb / num_workers * 0.7  # 70% usable per worker
+        bytes_per_row = 1000  # Estimate: ~1KB per row with metadata
+        per_worker_rows_budget = int((per_worker_mb * 1024 * 1024) / bytes_per_row)
 
-        if chunk_size is None:
-            chunk_size = int(total_rows_budget * 0.3)
-            chunk_size = max(10000, min(chunk_size, 1000000))
+        # rows_per_run controls TOTAL buffered rows per worker before flush
+        auto_rows_per_run = int(per_worker_rows_budget * 0.8)  # 80% of per-worker budget
+        auto_rows_per_run = max(10_000, min(auto_rows_per_run, 1_000_000))
 
-        active_shards = max(1, int(num_shards * 0.2))
-        auto_rows_per_run = int((total_rows_budget * 0.7) / active_shards)
-        auto_rows_per_run = max(10000, min(auto_rows_per_run, 500000))
-
+        print(f"  Per-worker memory budget: {per_worker_mb:.0f} MB (70% of {memory_limit_mb / num_workers:.0f} MB)")
+        print(f"  Estimated bytes per row: {bytes_per_row}")
+        print(f"  Per-worker rows budget: {per_worker_rows_budget:,}")
+        print(f"  Auto-tuned rows_per_run: {auto_rows_per_run:,} (80% of budget, capped at 1M)")
+        
         if rows_per_run != auto_rows_per_run:
-            print(f"Memory-tuned rows_per_run: {rows_per_run:,} → {auto_rows_per_run:,}")
+            print(f"  ✅ Overriding --rows_per_run: {rows_per_run:,} → {auto_rows_per_run:,}")
             rows_per_run = auto_rows_per_run
+        else:
+            print(f"  ℹ️  Using specified --rows_per_run: {rows_per_run:,} (matches auto-tune)")
     else:
-        if chunk_size is None:
-            chunk_size = 100000
+        print(f"No memory limit specified")
+        print(f"  Using --rows_per_run: {rows_per_run:,}")
+    
+    print(f"\n💾 Final memory settings:")
+    print(f"  rows_per_run: {rows_per_run:,} (total buffered rows per worker before flush)")
+    print(f"  Est. memory per worker: ~{(rows_per_run * 1000) / 1024 / 1024:.0f} MB")
+    print(f"  Est. total memory usage: ~{(rows_per_run * 1000 * num_workers) / 1024 / 1024:.0f} MB across {num_workers} workers")
+    
+    if memory_limit_mb and (rows_per_run * 1000 * num_workers) / 1024 / 1024 > memory_limit_mb:
+        print(f"  ⚠️  WARNING: Estimated memory ({(rows_per_run * 1000 * num_workers) / 1024 / 1024:.0f} MB) exceeds limit ({memory_limit_mb} MB)")
+        print(f"     Consider reducing --workers or specifying a manual --rows_per_run")
 
     pipeline_start = time.time()
 
@@ -1457,7 +1560,7 @@ def run_pipeline_v2(
             original_size = len(concept_map)
 
             # Pre-scan to find used concept_ids
-            used_concept_ids = prescan_concept_ids_v2(omop_dir, config, num_workers, verbose)
+            used_concept_ids = prescan_concept_ids(omop_dir, config, num_workers, verbose)
 
             # Filter concept map
             concept_map = {cid: code for cid, code in concept_map.items() if cid in used_concept_ids}
@@ -1484,12 +1587,19 @@ def run_pipeline_v2(
     print(f"\n=== STAGE 1: PARTITIONING ===")
     stage1_start = time.time()
 
-    files = discover_omop_files(omop_dir, config, code_mapping_type)
+    files = discover_omop_files(omop_dir, config, code_mapping_type, strict)
     print(f"Found {len(files)} files to process")
 
     if not files:
-        print("ERROR: No files found")
-        return
+        msg = "ERROR: No files found to process"
+        if strict:
+            print(f"\n{msg}")
+            print("In strict mode, this is a fatal error.")
+            import sys
+            sys.exit(1)
+        else:
+            print(f"WARNING: {msg}")
+            return
 
     # Greedy load balancing
     file_info = [(f, f[1].stat().st_size if f[1].exists() else 0) for f in files]
@@ -1516,12 +1626,8 @@ def run_pipeline_v2(
             num_shards,
             rows_per_run,
             temp_dir,
-            code_mapping_type,
-            concept_map,
-            chunk_size,
             compression,
             meds_schema,
-            col_types,
             concept_df,
             progress_counter,
         )
@@ -1529,50 +1635,87 @@ def run_pipeline_v2(
     ]
 
     # Run workers with progress tracking
-    print(f"\nProcessing {len(files)} files across {num_workers} workers...")
+    print(f"\n⚡ Processing {len(files)} files across {num_workers} workers...")
+    print(f"   Polars threads per worker: {polars_threads}")
+    print(f"   rows_per_run: {rows_per_run:,} (total buffered before flush)")
 
     with mp.Pool(processes=num_workers) as pool:
         # Start workers asynchronously
-        async_result = pool.map_async(partition_worker_v2, worker_args)
+        async_result = pool.map_async(partition_worker, worker_args)
 
         # Progress bar tracking files processed (updates in real-time)
-        with tqdm(total=len(files), desc="Files processed", unit="file") as pbar:
+        with tqdm(total=len(files), desc="Files processed", unit="file", smoothing=0.1) as pbar:
             last_count = 0
+            check_interval = 0.5  # Check every 500ms (less contention on Manager.Value)
+            timeout_counter = 0
+            max_timeout_checks = 600  # 5 minutes without progress before warning
+            
             while not async_result.ready():
-                # Check current progress
-                current_count = progress_counter.value
-                if current_count > last_count:
-                    pbar.update(current_count - last_count)
-                    last_count = current_count
-                time.sleep(0.1)  # Check every 100ms
+                try:
+                    # Check current progress
+                    current_count = progress_counter.value
+                    if current_count > last_count:
+                        pbar.update(current_count - last_count)
+                        last_count = current_count
+                        timeout_counter = 0  # Reset timeout on progress
+                    else:
+                        timeout_counter += 1
+                        if timeout_counter >= max_timeout_checks:
+                            tqdm.write(f"\n⚠️  No progress for {timeout_counter * check_interval / 60:.1f} minutes - workers may be processing large files...")
+                            timeout_counter = 0  # Reset to avoid spam
+                    
+                    time.sleep(check_interval)
+                except:
+                    # Ignore errors accessing progress counter
+                    time.sleep(check_interval)
 
-            # Final update
-            current_count = progress_counter.value
-            if current_count > last_count:
-                pbar.update(current_count - last_count)
-
-        # Get results
-        results = async_result.get()
+            # Get results with timeout (while progress bar is still open)
+            try:
+                results = async_result.get(timeout=300)  # 5 minute timeout for final collection
+            except mp.TimeoutError:
+                tqdm.write("\n⚠️  WARNING: Workers timed out. Results may be incomplete.")
+                pool.terminate()
+                pool.join()
+                return
+            
+            # Final reconciliation: use ground truth from worker results
+            # The shared counter may lag due to synchronization delays
+            actual_files_processed = sum(r["files_processed"] for r in results)
+            
+            # Update progress bar to reflect actual completion
+            if actual_files_processed > last_count:
+                pbar.update(actual_files_processed - last_count)
+            elif actual_files_processed < last_count:
+                # This shouldn't happen, but if counter overshot, log it
+                tqdm.write(f"\n⚠️  Counter mismatch: shared counter={last_count}, actual={actual_files_processed}")
+            
+            # Final check: ensure progress bar accurately reflects completion
+            # pbar.n is the current count, pbar.total is the expected total
+            if actual_files_processed == pbar.total and pbar.n < pbar.total:
+                # All files processed but progress bar hasn't caught up (sync lag)
+                pbar.update(pbar.total - pbar.n)
+            elif actual_files_processed != pbar.total:
+                # Mismatch between expected and actual - this indicates a problem
+                tqdm.write(f"\n⚠️  Expected {pbar.total} files, but processed {actual_files_processed}")
 
     stage1_elapsed = time.time() - stage1_start
-    total_rows_output = sum(r["rows_processed"] for r in results)
-    total_rows_input = sum(r.get("rows_input", 0) for r in results)
-    total_rows_filtered = sum(r.get("rows_filtered", 0) for r in results)
+    total_rows = sum(r["rows_processed"] for r in results)
 
-    print(f"\nStage 1 completed:")
-    print(f"  Rows output: {total_rows_output:,}")
-    if total_rows_input > 0:
-        filter_pct = 100 * total_rows_filtered / total_rows_input
-        print(f"  Rows input: {total_rows_input:,}")
-        print(f"  Rows filtered: {total_rows_filtered:,} ({filter_pct:.1f}%)")
-        if code_mapping_type == "concept_id" and total_rows_filtered > 0:
-            print(f"    └─ Note: Filtered rows likely unmapped concept_ids")
-    print(f"  Time: {stage1_elapsed:.2f}s")
-    print(f"  Throughput: {total_rows_output/stage1_elapsed:,.0f} rows/sec")
+    print(f"\n✅ Stage 1 completed:")
+    print(f"   Rows processed: {total_rows:,}")
+    print(f"   Time: {stage1_elapsed:.2f}s")
+    print(f"   Throughput: {total_rows/stage1_elapsed:,.0f} rows/sec")
 
-    # Stage 2: Merge
+    # Stage 2: Merge (optional - can be disabled)
+    if skip_merge:
+        print(f"\n⏭️  Stage 2 (merge) SKIPPED - partitioned data in {temp_dir}")
+        print(f"\n=== PIPELINE COMPLETE (Stage 1 only) ===")
+        print(f"Total time: {stage1_elapsed:.2f}s")
+        print(f"Partitioned output: {temp_dir}")
+        return
+    
     print(f"\n=== STAGE 2: MERGING ===")
-    print(f"Merging {num_shards} shards")
+    print(f"Merging {num_shards} shards...")
     stage2_start = time.time()
 
     merge_args = [
@@ -1582,7 +1725,7 @@ def run_pipeline_v2(
     # Run merge workers with progress tracking
     with mp.Pool(processes=min(num_workers, num_shards)) as pool:
         # Use imap_unordered to get results as they complete
-        results_iter = pool.imap_unordered(merge_worker_v2, merge_args)
+        results_iter = pool.imap_unordered(merge_worker, merge_args)
 
         # Progress bar tracking shards merged
         with tqdm(total=num_shards, desc="Shards merged", unit="shard") as pbar:
@@ -1624,39 +1767,53 @@ def run_pipeline_v2(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Scalable OMOP to MEDS ETL Pipeline v2 (MEDS-compliant)")
+    parser = argparse.ArgumentParser(
+        description="Scalable OMOP to MEDS ETL Pipeline (Schema-Agnostic, DataFrame-Based)"
+    )
 
-    parser.add_argument("--omop_dir", required=True, help="OMOP data directory")
+    parser.add_argument("--omop_dir", required=True, help="OMOP data directory (Parquet files)")
     parser.add_argument("--output_dir", required=True, help="Output directory")
     parser.add_argument("--config", required=True, help="ETL config JSON")
     parser.add_argument("--code_mapping", choices=["source_value", "concept_id"], required=True)
-    parser.add_argument("--shards", type=int, default=100)
-    parser.add_argument("--workers", type=int, default=mp.cpu_count())
-    parser.add_argument("--rows_per_run", type=int, default=500000)
-    parser.add_argument("--batch_size", type=int, default=100000)
-    parser.add_argument("--polars_threads", type=int, default=None)
-    parser.add_argument("--memory_limit_mb", type=int, default=None)
-    parser.add_argument("--chunk_size", type=int, default=None)
+    parser.add_argument("--shards", type=int, default=100, help="Number of output shards")
+    parser.add_argument("--workers", type=int, default=mp.cpu_count(), help="Number of worker processes")
+    parser.add_argument("--rows_per_run", type=int, default=50_000, help="Total rows to buffer before flushing (controls memory)")
+    parser.add_argument("--batch_size", type=int, default=100_000, help="Batch size for Stage 2 merge")
+    parser.add_argument("--polars_threads", type=int, default=None, help="Polars threads per worker")
+    parser.add_argument("--memory_limit_mb", type=int, default=None, help="Memory limit (auto-tunes rows_per_run)")
     parser.add_argument("--compression", choices=["lz4", "zstd", "snappy", "gzip"], default="lz4")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument(
         "--no-optimize-concepts",
         dest="optimize_concepts",
         action="store_false",
-        help="Disable concept map optimization (default: enabled for faster joins)",
+        help="Disable concept map optimization (default: enabled)",
+    )
+    parser.add_argument(
+        "--skip-merge",
+        action="store_true",
+        help="Skip Stage 2 (merge) - only run Stage 1 (partition)",
+    )
+    parser.add_argument(
+        "--no-strict",
+        dest="strict",
+        action="store_false",
+        help="Disable strict mode (default: strict=True, exits on missing tables or invalid config)",
     )
 
     args = parser.parse_args()
 
-    print("=== SCALABLE OMOP TO MEDS ETL v2 ===")
+    print("=== SCALABLE OMOP TO MEDS ETL (Refactored) ===")
     print(f"OMOP directory: {args.omop_dir}")
     print(f"Output directory: {args.output_dir}")
     print(f"Config: {args.config}")
+    print(f"Code mapping: {args.code_mapping}")
+    print(f"Strict mode: {'ENABLED' if args.strict else 'DISABLED (will skip problematic tables)'}")
 
     with open(args.config, "r") as f:
         config = json.load(f)
 
-    run_pipeline_v2(
+    run_pipeline(
         omop_dir=Path(args.omop_dir),
         output_dir=Path(args.output_dir),
         config=config,
@@ -1668,9 +1825,10 @@ def main():
         verbose=args.verbose,
         polars_threads=args.polars_threads,
         memory_limit_mb=args.memory_limit_mb,
-        chunk_size=args.chunk_size,
         compression=args.compression,
         optimize_concepts=args.optimize_concepts,
+        skip_merge=args.skip_merge,
+        strict=args.strict,
     )
 
 
