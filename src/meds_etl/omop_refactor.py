@@ -442,15 +442,38 @@ def find_concept_id_columns_for_prescan(table_name: str, config: Dict) -> List[s
     return columns
 
 
-def fast_scan_file_for_concept_ids(file_path: Path, concept_id_columns: List[str]) -> Set[int]:
+def validate_parquet_file(file_path: Path) -> bool:
+    """
+    Quick validation check for parquet file health.
+
+    Returns:
+        True if file appears readable, False otherwise
+    """
+    try:
+        # Try to read just the schema (fast)
+        pq.read_schema(file_path)
+        return True
+    except Exception:
+        return False
+
+
+def fast_scan_file_for_concept_ids(file_path: Path, concept_id_columns: List[str]) -> Tuple[Set[int], Optional[str]]:
     """
     Fast scan of a single file to extract unique concept_ids.
 
     Uses Polars lazy evaluation to only read specified columns.
+
+    Returns:
+        (concept_ids_set, error_message)
+        error_message is None if successful
     """
     concept_ids = set()
 
     try:
+        # Quick validation first
+        if not validate_parquet_file(file_path):
+            return concept_ids, f"File validation failed: {file_path.name}"
+
         # Use lazy scan (doesn't load full file into memory)
         lazy_df = pl.scan_parquet(file_path)
 
@@ -459,7 +482,7 @@ def fast_scan_file_for_concept_ids(file_path: Path, concept_id_columns: List[str
         existing_cols = [col for col in concept_id_columns if col in schema.names()]
 
         if not existing_cols:
-            return concept_ids
+            return concept_ids, None
 
         # Select only concept_id columns and get unique values
         for col in existing_cols:
@@ -471,35 +494,57 @@ def fast_scan_file_for_concept_ids(file_path: Path, concept_id_columns: List[str
                 if concept_id is not None and concept_id > 0:
                     concept_ids.add(concept_id)
 
-    except Exception:
-        pass  # Silently skip problematic files
+        return concept_ids, None
 
-    return concept_ids
+    except Exception as e:
+        return concept_ids, f"{file_path.name}: {str(e)}"
 
 
-def prescan_worker(args: Tuple) -> Set[int]:
+def prescan_worker(args: Tuple) -> Dict[str, Any]:
     """
     Worker process to scan a batch of files for concept_ids.
 
     Returns:
-        Set of all concept_ids found by this worker
+        Dict with concept_ids, file count, and any errors
     """
     worker_id, file_batch = args
 
     worker_concept_ids = set()
+    files_processed = 0
+    errors = []
 
     for file_path, concept_id_columns in file_batch:
-        concept_ids = fast_scan_file_for_concept_ids(file_path, concept_id_columns)
-        worker_concept_ids.update(concept_ids)
+        try:
+            concept_ids, error = fast_scan_file_for_concept_ids(file_path, concept_id_columns)
+            worker_concept_ids.update(concept_ids)
+            files_processed += 1
 
-    return worker_concept_ids
+            if error:
+                errors.append(error)
+
+        except Exception as e:
+            errors.append(f"{file_path.name}: Unexpected error: {str(e)}")
+
+    return {
+        "worker_id": worker_id,
+        "concept_ids": worker_concept_ids,
+        "files_processed": files_processed,
+        "errors": errors,
+    }
 
 
-def prescan_concept_ids(omop_dir: Path, config: Dict, num_workers: int, verbose: bool = False) -> Set[int]:
+def prescan_concept_ids(
+    omop_dir: Path,
+    config: Dict,
+    num_workers: int,
+    verbose: bool = False,
+    timeout_per_worker: int = 600,  # 10 minutes per worker
+) -> Set[int]:
     """
     Fast parallel pre-scan to collect all unique concept_ids used in OMOP data.
 
     Uses greedy load balancing for optimal worker distribution.
+    Includes timeout protection and error reporting.
 
     Returns:
         Set of unique concept_ids found in the data
@@ -527,6 +572,8 @@ def prescan_concept_ids(omop_dir: Path, config: Dict, num_workers: int, verbose:
             print("  No files to scan for concept optimization")
         return set()
 
+    print(f"  Pre-scanning {len(files_to_scan)} files...")
+
     # Greedy load balancing
     file_info = []
     for file_tuple in files_to_scan:
@@ -550,19 +597,51 @@ def prescan_concept_ids(omop_dir: Path, config: Dict, num_workers: int, verbose:
     # Create worker arguments
     worker_args = [(i, batch) for i, batch in enumerate(worker_loads)]
 
-    # Run workers in parallel
+    # Run workers in parallel with timeout protection
     import multiprocessing as mp
+    from multiprocessing.pool import AsyncResult
 
-    with mp.Pool(processes=num_workers) as pool:
-        worker_results = pool.map(prescan_worker, worker_args)
-
-    # Merge results
     all_concept_ids = set()
-    for worker_set in worker_results:
-        all_concept_ids.update(worker_set)
+    total_errors = []
 
-    if verbose:
-        print(f"  Pre-scanned {len(files_to_scan)} files, found {len(all_concept_ids):,} unique concept_ids")
+    try:
+        with mp.Pool(processes=num_workers) as pool:
+            # Use map_async for timeout support
+            async_result = pool.map_async(prescan_worker, worker_args)
+
+            # Wait with timeout
+            try:
+                worker_results = async_result.get(timeout=timeout_per_worker)
+
+                # Merge results
+                total_files_processed = 0
+                for result in worker_results:
+                    all_concept_ids.update(result["concept_ids"])
+                    total_files_processed += result["files_processed"]
+                    total_errors.extend(result["errors"])
+
+                if verbose:
+                    print(f"  ✓ Pre-scanned {total_files_processed}/{len(files_to_scan)} files successfully")
+                    print(f"  ✓ Found {len(all_concept_ids):,} unique concept_ids")
+
+                    if total_errors:
+                        print(f"  ⚠️  {len(total_errors)} files had errors:")
+                        for error in total_errors[:5]:  # Show first 5 errors
+                            print(f"     - {error}")
+                        if len(total_errors) > 5:
+                            print(f"     ... and {len(total_errors) - 5} more")
+
+            except mp.TimeoutError:
+                print(f"  ⚠️  WARNING: Pre-scan timed out after {timeout_per_worker}s")
+                print(f"  ⚠️  Continuing without concept optimization (will use full concept table)")
+                pool.terminate()
+                pool.join()
+                return set()  # Return empty set to use full concept table
+
+    except Exception as e:
+        print(f"  ⚠️  WARNING: Pre-scan failed: {e}")
+        print(f"  ⚠️  Continuing without concept optimization (will use full concept table)")
+        return set()
 
     return all_concept_ids
 
@@ -951,6 +1030,208 @@ def process_omop_file_worker(args: Tuple) -> Dict:
 
 
 # ============================================================================
+# SEQUENTIAL LOW-MEMORY SORT
+# ============================================================================
+
+
+def process_single_shard(args: Tuple) -> Dict:
+    """
+    Worker function to process a single shard.
+
+    Reads all unsorted files, filters for this shard, sorts, and writes.
+    """
+    shard_id, unsorted_files, output_dir, num_shards = args
+
+    try:
+        shard_data = []
+
+        # Read and filter data for this shard from all unsorted files
+        for unsorted_file in unsorted_files:
+            try:
+                # Lazy scan and filter
+                df = pl.scan_parquet(unsorted_file).filter((pl.col("subject_id") % num_shards) == shard_id).collect()
+
+                if len(df) > 0:
+                    shard_data.append(df)
+
+            except Exception:
+                continue
+
+        # If no data for this shard, skip
+        if not shard_data:
+            return {"shard_id": shard_id, "rows": 0, "success": True}
+
+        # Concatenate and sort
+        shard_df = pl.concat(shard_data, rechunk=True)
+        row_count = len(shard_df)
+
+        # Sort by subject_id, then time
+        shard_df = shard_df.sort(["subject_id", "time"])
+
+        # Write shard
+        output_file = output_dir / f"{shard_id}.parquet"
+        shard_df.write_parquet(output_file, compression="zstd")
+
+        # Free memory
+        del shard_df
+        del shard_data
+
+        return {"shard_id": shard_id, "rows": row_count, "success": True}
+
+    except Exception as e:
+        return {"shard_id": shard_id, "rows": 0, "success": False, "error": str(e)}
+
+
+def parallel_shard_sort(
+    unsorted_dir: Path,
+    output_dir: Path,
+    num_shards: int,
+    num_workers: int,
+    verbose: bool = False,
+) -> None:
+    """
+    Parallel shard-based external sort.
+
+    Uses multiple workers where each worker processes one complete shard at a time:
+    1. Worker takes next shard from queue
+    2. Loads all data for that shard (filtering from unsorted files)
+    3. Sorts in memory
+    4. Writes to output
+    5. Moves to next shard
+
+    Memory usage: ~num_workers * shard_size
+    Speed: Much faster than sequential, slower than meds_etl_cpp
+
+    Writes to output_dir/result/data/ to match other backends.
+    """
+    print(f"\n✅ Using parallel shard-based sort...")
+    print(f"   Workers: {num_workers}")
+    print(f"   Shards: {num_shards}")
+    print(f"   Memory usage: ~{num_workers} shards in RAM at once")
+
+    # Create output directory (match other backends: output_dir/result/data/)
+    result_dir = output_dir / "result"
+    final_data_dir = result_dir / "data"
+    final_data_dir.mkdir(parents=True, exist_ok=True)
+
+    # Find all unsorted files
+    unsorted_files = list(unsorted_dir.glob("*.parquet"))
+
+    if not unsorted_files:
+        print(f"   ⚠️  No unsorted files found in {unsorted_dir}")
+        return
+
+    print(f"\n   Found {len(unsorted_files)} unsorted files")
+
+    # Create tasks for all shards
+    tasks = [(shard_id, unsorted_files, final_data_dir, num_shards) for shard_id in range(num_shards)]
+
+    # Process shards in parallel
+    if num_workers > 1:
+        with mp.Pool(processes=num_workers) as pool:
+            results = list(
+                tqdm(pool.imap_unordered(process_single_shard, tasks), total=num_shards, desc="Processing shards")
+            )
+    else:
+        results = []
+        for task in tqdm(tasks, desc="Processing shards"):
+            results.append(process_single_shard(task))
+
+    # Report results
+    successes = [r for r in results if r["success"]]
+    failures = [r for r in results if not r["success"]]
+    total_rows = sum(r["rows"] for r in successes)
+
+    print(f"\n   ✅ Parallel shard sort complete")
+    print(f"   Shards processed: {len(successes)}/{num_shards}")
+    print(f"   Total rows: {total_rows:,}")
+
+    if failures and verbose:
+        print(f"   ⚠️  {len(failures)} shards failed:")
+        for f in failures[:5]:
+            print(f"      Shard {f['shard_id']}: {f.get('error', 'Unknown error')}")
+
+
+def sequential_shard_sort(
+    unsorted_dir: Path,
+    output_dir: Path,
+    num_shards: int,
+    verbose: bool = False,
+) -> None:
+    """
+    Sequential low-memory external sort.
+
+    Processes one shard at a time to minimize memory usage:
+    1. Read all unsorted files
+    2. For each shard ID (0 to num_shards-1):
+       - Filter records for this shard (subject_id % num_shards == shard_id)
+       - Sort by (subject_id, time)
+       - Write to output
+
+    This is slower than parallel processing but uses minimal memory
+    (only one shard in memory at a time).
+
+    Writes to output_dir/result/data/ to match other backends.
+    """
+    print(f"\n✅ Using sequential low-memory sort...")
+    print(f"   Processing {num_shards} shards one at a time")
+    print(f"   Memory usage: ~1 shard in RAM at a time")
+
+    # Create output directory (match other backends: output_dir/result/data/)
+    result_dir = output_dir / "result"
+    final_data_dir = result_dir / "data"
+    final_data_dir.mkdir(parents=True, exist_ok=True)
+
+    # Find all unsorted files
+    unsorted_files = list(unsorted_dir.glob("*.parquet"))
+
+    if not unsorted_files:
+        print(f"   ⚠️  No unsorted files found in {unsorted_dir}")
+        return
+
+    print(f"\n   Found {len(unsorted_files)} unsorted files")
+
+    # Process each shard sequentially
+    for shard_id in tqdm(range(num_shards), desc="Processing shards"):
+        shard_data = []
+
+        # Read and filter data for this shard from all unsorted files
+        for unsorted_file in unsorted_files:
+            try:
+                # Lazy scan and filter
+                df = pl.scan_parquet(unsorted_file).filter((pl.col("subject_id") % num_shards) == shard_id).collect()
+
+                if len(df) > 0:
+                    shard_data.append(df)
+
+            except Exception as e:
+                if verbose:
+                    print(f"\n   ⚠️  Error reading {unsorted_file}: {e}")
+                continue
+
+        # If no data for this shard, skip
+        if not shard_data:
+            continue
+
+        # Concatenate and sort
+        shard_df = pl.concat(shard_data, rechunk=True)
+
+        # Sort by subject_id, then time
+        shard_df = shard_df.sort(["subject_id", "time"])
+
+        # Write shard
+        output_file = final_data_dir / f"{shard_id}.parquet"
+        shard_df.write_parquet(output_file, compression="zstd")
+
+        # Free memory
+        del shard_df
+        del shard_data
+
+    print(f"\n   ✅ Sequential sort complete")
+    print(f"   Output: {final_data_dir}")
+
+
+# ============================================================================
 # MAIN ETL PIPELINE
 # ============================================================================
 
@@ -965,6 +1246,8 @@ def run_omop_to_meds_etl(
     code_mapping_mode: str = "auto",
     verbose: bool = False,
     optimize_concepts: bool = True,
+    low_memory: bool = False,
+    parallel_shards: bool = False,
 ):
     """
     Run OMOP to MEDS ETL pipeline.
@@ -989,9 +1272,14 @@ def run_omop_to_meds_etl(
         num_shards: Number of output shards (default: from config or 100)
         code_mapping_mode: Code mapping strategy: 'auto', 'concept_id', 'source_value', or 'template'
         optimize_concepts: If True, pre-scan data to optimize concept map (99% memory reduction)
-        backend: Legacy parameter, ignored (Stage 2 always uses external sort)
+        backend: Backend for Stage 2 sort: 'auto' (try cpp, fallback polars), 'cpp', 'polars'
+        low_memory: If True, use sequential shard processing (slowest, minimal memory)
+        parallel_shards: If True, use parallel shard processing (each worker processes one shard)
 
-    Recommended: Install meds_etl_cpp for memory-bounded Stage 2 sorting.
+    Sort options (Stage 2):
+    - Default (backend='auto'): meds_etl_cpp if available, else unsorted.sort()
+    - --parallel-shards: N workers, each processes one shard at a time (moderate memory)
+    - --low-memory: 1 worker, sequential processing (minimal memory)
     """
     print("\n" + "=" * 70)
     print("OMOP → MEDS ETL PIPELINE (REFACTORED)")
@@ -1284,49 +1572,61 @@ def run_omop_to_meds_etl(
         print(f"  Workers: {num_workers}")
 
     # Determine which backend to use
-    use_cpp = False
+    if low_memory:
+        # Sequential low-memory mode (single worker)
+        print(f"\n🔧 Low-memory mode enabled")
+        sequential_shard_sort(unsorted_dir, output_dir, num_shards, verbose=verbose)
 
-    if backend in ["cpp", "auto"]:
-        try:
+    elif parallel_shards:
+        # Parallel shard mode (each worker processes one shard at a time)
+        print(f"\n🔧 Parallel shard mode enabled")
+        parallel_shard_sort(unsorted_dir, output_dir, num_shards, num_workers, verbose=verbose)
+
+    else:
+        # Standard mode: try C++ backend, fallback to Python
+        use_cpp = False
+
+        if backend in ["cpp", "auto"]:
+            try:
+                import meds_etl_cpp
+
+                use_cpp = True
+            except ImportError:
+                if backend == "cpp":
+                    print(f"\n❌ ERROR: meds_etl_cpp not available but --backend cpp was specified")
+                    sys.exit(1)
+                elif backend == "auto":
+                    print(f"\n⚠️  meds_etl_cpp not available, using Python fallback...")
+
+        if use_cpp:
+            print(f"\n✅ Using meds_etl_cpp (C++) for external sort...")
+            print(f"   Memory-bounded, multi-threaded, optimized k-way merge")
+
             import meds_etl_cpp
 
-            use_cpp = True
-        except ImportError:
-            if backend == "cpp":
-                print(f"\n❌ ERROR: meds_etl_cpp not available but --backend cpp was specified")
-                sys.exit(1)
-            elif backend == "auto":
-                print(f"\n⚠️  meds_etl_cpp not available, using Python fallback...")
+            meds_etl_cpp.perform_etl(
+                str(temp_dir),  # Source: temp/ with metadata/ and unsorted_data/
+                str(output_dir / "result"),  # Target
+                num_shards,
+                num_workers,
+            )
 
-    if use_cpp:
-        print(f"\n✅ Using meds_etl_cpp (C++) for external sort...")
-        print(f"   Memory-bounded, multi-threaded, optimized k-way merge")
+            print(f"   ✅ C++ external sort complete")
+        else:
+            print(f"\n⚠️  Using Python/Polars for sorting...")
+            print(f"   Warning: Python sorting loads entire shards into memory!")
+            print(f"   For large datasets, install meds_etl_cpp for memory-bounded sorting.")
 
-        import meds_etl_cpp
+            # Python fallback (loads shards into memory - not ideal for large data)
+            meds_etl.unsorted.sort(
+                source_unsorted_path=str(temp_dir),
+                target_meds_path=str(output_dir / "result"),
+                num_shards=num_shards,
+                num_proc=num_workers,
+                backend="polars",
+            )
 
-        meds_etl_cpp.perform_etl(
-            str(temp_dir),  # Source: temp/ with metadata/ and unsorted_data/
-            str(output_dir / "result"),  # Target
-            num_shards,
-            num_workers,
-        )
-
-        print(f"   ✅ C++ external sort complete")
-    else:
-        print(f"\n⚠️  Using Python/Polars for sorting...")
-        print(f"   Warning: Python sorting loads entire shards into memory!")
-        print(f"   For large datasets, install meds_etl_cpp for memory-bounded sorting.")
-
-        # Python fallback (loads shards into memory - not ideal for large data)
-        meds_etl.unsorted.sort(
-            source_unsorted_path=str(temp_dir),
-            target_meds_path=str(output_dir / "result"),
-            num_shards=num_shards,
-            num_proc=num_workers,
-            backend="polars",
-        )
-
-    # Move final data to output
+    # Move final data to output (applies to all backends)
     result_data_dir = output_dir / "result" / "data"
     if result_data_dir.exists():
         if final_dir.exists():
@@ -1423,6 +1723,16 @@ def main():
         action="store_false",
         help="Disable concept map optimization (default: enabled)",
     )
+    parser.add_argument(
+        "--low-memory",
+        action="store_true",
+        help="Use sequential shard processing (slowest, minimal memory usage - processes one shard at a time)",
+    )
+    parser.add_argument(
+        "--parallel-shards",
+        action="store_true",
+        help="Use parallel shard processing (each worker processes one shard at a time - moderate memory, faster than --low-memory)",
+    )
 
     args = parser.parse_args()
 
@@ -1436,6 +1746,8 @@ def main():
         code_mapping_mode=args.code_mapping,
         verbose=args.verbose,
         optimize_concepts=args.optimize_concepts,
+        low_memory=args.low_memory,
+        parallel_shards=args.parallel_shards,
     )
 
 
