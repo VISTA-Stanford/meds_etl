@@ -1,0 +1,500 @@
+{
+    "omop_cdm_version": "5.3.1",
+    "primary_key": "person_id",
+    "canonical_events": {
+        "birth": {
+            "code": "MEDS_BIRTH",
+            "table": "person",
+            "time_start": "birth_datetime",
+            "time_start_fallbacks": [
+                "year_of_birth",
+                "month_of_birth",
+                "day_of_birth"
+            ],
+            "metadata": [
+                {
+                    "name": "gender_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "race_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "ethnicity_concept_id",
+                    "type": "int"
+                }
+            ]
+        },
+        "death": {
+            "code": "MEDS_DEATH",
+            "table": "death",
+            "time_start": "death_datetime",
+            "time_start_fallbacks": [
+                "death_date"
+            ],
+            "metadata": [
+                {
+                    "name": "cause_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "death_type_concept_id",
+                    "type": "int"
+                }
+            ]
+        }
+    },
+    "tables": {
+        "visit_occurrence": {
+            "time_start": "visit_start_datetime",
+            "time_start_fallbacks": [
+                "visit_start_date"
+            ],
+            "time_end": "visit_end_datetime",
+            "time_end_fallbacks": [
+                "visit_end_date"
+            ],
+            "code_mappings": {
+                "source_value": {
+                    "field": "visit_source_value"
+                },
+                "concept_id": {
+                    "concept_id_field": "visit_concept_id",
+                    "source_concept_id_field": "visit_source_concept_id",
+                    "fallback_concept_id": 8
+                }
+            },
+            "metadata": [
+                {
+                    "name": "visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_type_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "provider_id",
+                    "type": "int"
+                },
+                {
+                    "name": "care_site_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_source_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "admitting_source_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "discharge_to_concept_id",
+                    "type": "int"
+                }
+            ]
+        },
+        "visit_detail": {
+            "time_start": "visit_detail_start_datetime",
+            "time_start_fallbacks": [
+                "visit_detail_start_date"
+            ],
+            "time_end": "visit_detail_end_datetime",
+            "time_end_fallbacks": [
+                "visit_detail_end_date"
+            ],
+            "metadata": [
+                {
+                    "name": "visit_detail_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_detail_type_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "provider_id",
+                    "type": "int"
+                },
+                {
+                    "name": "care_site_id",
+                    "type": "int"
+                }
+            ],
+            "code_mappings": {
+                "source_value": {
+                    "field": "visit_detail_source_value"
+                },
+                "concept_id": {
+                    "concept_id_field": "visit_detail_concept_id",
+                    "source_concept_id_field": "visit_detail_source_concept_id"
+                }
+            }
+        },
+        "condition_occurrence": {
+            "time_start": "condition_start_datetime",
+            "time_start_fallbacks": [
+                "condition_start_date"
+            ],
+            "time_end": "condition_end_datetime",
+            "time_end_fallbacks": [
+                "condition_end_date"
+            ],
+            "metadata": [
+                {
+                    "name": "condition_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "provider_id",
+                    "type": "int"
+                }
+            ],
+            "code_mappings": {
+                "source_value": {
+                    "field": "condition_source_value"
+                },
+                "concept_id": {
+                    "concept_id_field": "condition_concept_id",
+                    "source_concept_id_field": "condition_source_concept_id"
+                }
+            }
+        },
+        "drug_exposure": {
+            "time_start": "drug_exposure_start_datetime",
+            "time_start_fallbacks": [
+                "drug_exposure_start_date"
+            ],
+            "time_end": "drug_exposure_end_datetime",
+            "time_end_fallbacks": [
+                "drug_exposure_end_date"
+            ],
+            "metadata": [
+                {
+                    "name": "drug_exposure_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_detail_id",
+                    "type": "int"
+                },
+                {
+                    "name": "drug_type_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "route_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "quantity",
+                    "type": "float"
+                },
+                {
+                    "name": "days_supply",
+                    "type": "int"
+                },
+                {
+                    "name": "provider_id",
+                    "type": "int"
+                }
+            ],
+            "code_mappings": {
+                "source_value": {
+                    "field": "drug_source_value"
+                },
+                "concept_id": {
+                    "concept_id_field": "drug_concept_id",
+                    "source_concept_id_field": "drug_source_concept_id"
+                }
+            }
+        },
+        "procedure_occurrence": {
+            "time_start": "procedure_datetime",
+            "time_start_fallbacks": [
+                "procedure_date"
+            ],
+            "metadata": [
+                {
+                    "name": "procedure_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_detail_id",
+                    "type": "int"
+                },
+                {
+                    "name": "procedure_type_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "modifier_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "provider_id",
+                    "type": "int"
+                }
+            ],
+            "code_mappings": {
+                "source_value": {
+                    "field": "procedure_source_value"
+                },
+                "concept_id": {
+                    "concept_id_field": "procedure_concept_id",
+                    "source_concept_id_field": "procedure_source_concept_id"
+                }
+            }
+        },
+        "device_exposure": {
+            "time_start": "device_exposure_start_datetime",
+            "time_start_fallbacks": [
+                "device_exposure_start_date"
+            ],
+            "time_end": "device_exposure_end_datetime",
+            "time_end_fallbacks": [
+                "device_exposure_end_date"
+            ],
+            "metadata": [
+                {
+                    "name": "device_exposure_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "device_type_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "quantity",
+                    "type": "float"
+                },
+                {
+                    "name": "provider_id",
+                    "type": "int"
+                }
+            ],
+            "code_mappings": {
+                "source_value": {
+                    "field": "device_source_value"
+                },
+                "concept_id": {
+                    "concept_id_field": "device_concept_id",
+                    "source_concept_id_field": "device_source_concept_id"
+                }
+            }
+        },
+        "measurement": {
+            "time_start": "measurement_datetime",
+            "time_start_fallbacks": [
+                "measurement_date"
+            ],
+            "numeric_value_field": "value_as_number",
+            "text_value_field": "value_source_value",
+            "metadata": [
+                {
+                    "name": "measurement_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "measurement_source_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "unit_source_value",
+                    "type": "string"
+                },
+                {
+                    "name": "range_low",
+                    "type": "float"
+                },
+                {
+                    "name": "range_high",
+                    "type": "float"
+                },
+                {
+                    "name": "provider_id",
+                    "type": "int"
+                }
+            ],
+            "code_mappings": {
+                "source_value": {
+                    "field": "measurement_source_value"
+                },
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id",
+                    "source_concept_id_field": "measurement_source_concept_id"
+                }
+            }
+        },
+        "observation": {
+            "time_start": "observation_datetime",
+            "time_start_fallbacks": [
+                "observation_date"
+            ],
+            "numeric_value_field": "value_as_number",
+            "text_value_field": "value_as_string",
+            "metadata": [
+                {
+                    "name": "observation_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_detail_id",
+                    "type": "int"
+                },
+                {
+                    "name": "observation_type_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "unit_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "qualifier_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "provider_id",
+                    "type": "int"
+                }
+            ],
+            "code_mappings": {
+                "source_value": {
+                    "field": "observation_source_value"
+                },
+                "concept_id": {
+                    "concept_id_field": "observation_concept_id",
+                    "source_concept_id_field": "observation_source_concept_id"
+                }
+            }
+        },
+        "note": {
+            "time_start": "note_datetime",
+            "time_start_fallbacks": [
+                "note_date"
+            ],
+            "text_value_field": "note_text",
+            "metadata": [
+                {
+                    "name": "note_id",
+                    "type": "int"
+                },
+                {
+                    "name": "note_title",
+                    "type": "string"
+                },
+                {
+                    "name": "visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_detail_id",
+                    "type": "int"
+                },
+                {
+                    "name": "note_type_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "provider_id",
+                    "type": "int"
+                }
+            ],
+            "code_mappings": {
+                "source_value": {
+                    "field": "note_title"
+                },
+                "concept_id": {
+                    "concept_id_field": "note_type_concept_id"
+                }
+            }
+        },
+        "image_occurrence": {
+            "time_start": "image_occurrence_date",
+            "time_start_fallbacks": [
+                "image_occurrence_datetime"
+            ],
+            "metadata": [
+                {
+                    "name": "image_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "image_series_uid",
+                    "type": "string"
+                },
+                {
+                    "name": "image_study_uid",
+                    "type": "string"
+                },
+                {
+                    "name": "anatomic_site_source_value",
+                    "type": "string"
+                },
+                {
+                    "name": "procedure_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "_study_description",
+                    "type": "string"
+                },
+                {
+                    "name": "_series_description",
+                    "type": "string"
+                },
+                {
+                    "name": "_note_id",
+                    "type": "int"
+                },
+                {
+                    "name": "modality_source_value",
+                    "type": "string"
+                }
+            ],
+            "code_mappings": {
+                "source_value": {
+                    "field": "modality_source_value"
+                },
+                "concept_id": {
+                    "template": "IMAGE/{modality_source_value}|{anatomic_site_source_value}"
+                }
+            }
+        }
+    }
+}

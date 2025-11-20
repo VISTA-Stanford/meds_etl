@@ -1,0 +1,179 @@
+{
+    "omop_cdm_version": "5.3.1",
+    "primary_key": "person_id",
+    "canonical_events": {
+        "birth": {
+            "code": "MEDS_BIRTH",
+            "table": "person",
+            "time_field": "birth_datetime",
+            "time_fallbacks": [
+                "year_of_birth",
+                "month_of_birth",
+                "day_of_birth"
+            ]
+        },
+        "death": {
+            "code": "MEDS_DEATH",
+            "table": "death",
+            "time_field": "death_datetime",
+            "time_fallbacks": [
+                "death_date"
+            ]
+        }
+    },
+    "tables": {
+        "visit_occurrence": {
+            "time_field": "visit_start_datetime",
+            "time_fallbacks": [
+                "visit_start_date"
+            ],
+            "time_end_field": "visit_end_datetime",
+            "code_mappings": {
+                "source_value": {
+                    "field": "visit_source_value"
+                },
+                "concept_id": {
+                    "concept_id_field": "visit_concept_id",
+                    "source_concept_id_field": "visit_source_concept_id",
+                    "fallback_concept_id": 8
+                }
+            }
+        },
+        "visit_detail": {
+            "time_field": "visit_detail_start_datetime",
+            "time_fallbacks": [
+                "visit_detail_start_date"
+            ],
+            "time_end_field": "visit_detail_end_datetime",
+            "code_mappings": {
+                "source_value": {
+                    "field": "visit_detail_source_value"
+                },
+                "concept_id": {
+                    "concept_id_field": "visit_detail_concept_id",
+                    "source_concept_id_field": "visit_detail_source_concept_id"
+                }
+            }
+        },
+        "condition_occurrence": {
+            "time_field": "condition_start_datetime",
+            "time_fallbacks": [
+                "condition_start_date"
+            ],
+            "time_end_field": "condition_end_datetime",
+            "code_mappings": {
+                "source_value": {
+                    "field": "condition_source_value"
+                },
+                "concept_id": {
+                    "concept_id_field": "condition_concept_id",
+                    "source_concept_id_field": "condition_source_concept_id"
+                }
+            }
+        },
+        "drug_exposure": {
+            "time_field": "drug_exposure_start_datetime",
+            "time_fallbacks": [
+                "drug_exposure_start_date"
+            ],
+            "time_end_field": "drug_exposure_end_datetime",
+            "code_mappings": {
+                "source_value": {
+                    "field": "drug_source_value"
+                },
+                "concept_id": {
+                    "concept_id_field": "drug_concept_id",
+                    "source_concept_id_field": "drug_source_concept_id"
+                }
+            }
+        },
+        "procedure_occurrence": {
+            "time_field": "procedure_datetime",
+            "time_fallbacks": [
+                "procedure_date"
+            ],
+            "code_mappings": {
+                "source_value": {
+                    "field": "procedure_source_value"
+                },
+                "concept_id": {
+                    "concept_id_field": "procedure_concept_id",
+                    "source_concept_id_field": "procedure_source_concept_id"
+                }
+            }
+        },
+        "device_exposure": {
+            "time_field": "device_exposure_start_datetime",
+            "time_fallbacks": [
+                "device_exposure_start_date"
+            ],
+            "time_end_field": "device_exposure_end_datetime",
+            "code_mappings": {
+                "source_value": {
+                    "field": "device_source_value"
+                },
+                "concept_id": {
+                    "concept_id_field": "device_concept_id",
+                    "source_concept_id_field": "device_source_concept_id"
+                }
+            }
+        },
+        "measurement": {
+            "time_field": "measurement_datetime",
+            "time_fallbacks": [
+                "measurement_date"
+            ],
+            "numeric_value_field": "value_as_number",
+            "text_value_field": "value_source_value",
+            "code_mappings": {
+                "source_value": {
+                    "field": "measurement_source_value"
+                },
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id",
+                    "source_concept_id_field": "measurement_source_concept_id"
+                }
+            }
+        },
+        "observation": {
+            "time_field": "observation_datetime",
+            "time_fallbacks": [
+                "observation_date"
+            ],
+            "numeric_value_field": "value_as_number",
+            "text_value_field": "value_as_string",
+            "code_mappings": {
+                "source_value": {
+                    "field": "observation_source_value"
+                },
+                "concept_id": {
+                    "concept_id_field": "observation_concept_id",
+                    "source_concept_id_field": "observation_source_concept_id"
+                }
+            }
+        },
+        "note": {
+            "time_field": "note_datetime",
+            "time_fallbacks": [
+                "note_date"
+            ],
+            "text_value_field": "note_text",
+            "code_mappings": {
+                "source_value": {
+                    "field": "note_title"
+                }
+            }
+        },
+        "image_occurrence": {
+            "time_field": "image_occurrence_date",
+            "time_fallbacks": [
+                "image_occurrence_datetime"
+            ],
+            "code_mappings": {
+                "source_value": {
+                    "field": "modality_source_value"
+                }
+            }
+        }
+    }
+}
