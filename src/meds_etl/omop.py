@@ -148,143 +148,91 @@ def write_event_data(
     path_to_MEDS_unsorted_dir: str,
     get_batch: Any,
     table_name: str,
-    table_config: Mapping[str, Any],
+    all_table_details: Iterable[Mapping[str, Any]],
     concept_id_map: Mapping[int, str],
     concept_name_map: Mapping[int, str],
-    primary_key: str = "person_id",
-    is_canonical: bool = False,
-    canonical_code: str = None,
-) -> None:
-    """Write event data from the given table to event files in MEDS Unsorted format
+) -> pl.LazyFrame:
+    """Write event data from the given table to event files in MEDS Unsorted format"""
+    for table_details in all_table_details:
+        batch = get_batch()
 
-    Args:
-        path_to_MEDS_unsorted_dir: Directory to write MEDS Unsorted output files
-        get_batch: Callable that returns a LazyFrame for the batch
-        table_name: Name of the OMOP table being processed
-        table_config: Dictionary with table configuration (time_field, code_field, etc.)
-        concept_id_map: Dictionary mapping concept IDs to concept codes
-        concept_name_map: Dictionary mapping concept IDs to concept names
-        primary_key: Name of the primary key column (default: "person_id")
-        is_canonical: Whether this is a canonical event (BIRTH/DEATH)
-        canonical_code: If canonical, the code to use (e.g., "MEDS_BIRTH")
-    """
-    batch = get_batch()
+        batch = batch.rename({c: c.lower() for c in batch.collect_schema().names()})
+        schema = batch.collect_schema()
+        # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+        # Determine what to use for the `subject_id` column in MEDS Unsorted  #
+        # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
-    batch = batch.rename({c: c.lower() for c in batch.collect_schema().names()})
-    schema = batch.collect_schema()
+        # Define the MEDS Unsorted `subject_id` (left) to be the `person_id` columns in OMOP (right)
+        subject_id = pl.col("person_id").cast(pl.Int64)
 
-    # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
-    # Determine what to use for the `subject_id` column in MEDS Unsorted  #
-    # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+        # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+        # Determine what to use for the `time`                          #
+        # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
-    # Use the configured primary_key column as subject_id
-    subject_id = pl.col(primary_key.lower()).cast(pl.Int64)
-
-    # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
-    # Determine what to use for the `time`                          #
-    # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
-
-    # Build timestamp from config
-    time_field = table_config.get("time_field", "").lower()
-    time_fallbacks = [f.lower() for f in table_config.get("time_fallbacks", [])]
-
-    # Special handling for birth: construct from year/month/day if needed
-    if is_canonical and canonical_code == meds.birth_code:
-        if "year_of_birth" in schema.names():
+        # Use special processing for the `PERSON` OMOP table
+        if table_name == "person":
+            # Take the `birth_datetime` if its available, otherwise
+            # construct it from `year_of_birth`, `month_of_birth`, `day_of_birth`
             time = pl.coalesce(
-                (
-                    cast_to_datetime(schema, time_field)
-                    if time_field and time_field in schema.names()
-                    else pl.lit(None, dtype=pl.Datetime(time_unit="us"))
-                ),
+                cast_to_datetime(schema, "birth_datetime"),
                 pl.datetime(
                     pl.col("year_of_birth"),
-                    pl.coalesce(
-                        pl.col("month_of_birth") if "month_of_birth" in schema.names() else pl.lit(1), pl.lit(1)
-                    ),
-                    pl.coalesce(pl.col("day_of_birth") if "day_of_birth" in schema.names() else pl.lit(1), pl.lit(1)),
+                    pl.coalesce(pl.col("month_of_birth"), pl.lit(1)),
+                    pl.coalesce(pl.col("day_of_birth"), pl.lit(1)),
                     time_unit="us",
                 ),
             )
         else:
-            time = (
-                cast_to_datetime(schema, time_field)
-                if time_field in schema.names()
-                else pl.lit(None, dtype=pl.Datetime(time_unit="us"))
-            )
-    else:
-        options = []
-        if time_field and time_field in schema.names():
-            options.append(cast_to_datetime(schema, time_field, move_to_end_of_day=True))
-
-        for fallback in time_fallbacks:
-            if fallback in schema.names():
-                options.append(cast_to_datetime(schema, fallback, move_to_end_of_day=True))
-
-        if not options:
-            raise ValueError(
-                f"Could not find a valid time column for table '{table_name}'. "
-                f"Config specified: time_field={table_config.get('time_field')}, "
-                f"fallbacks={table_config.get('time_fallbacks', [])}. "
-                f"Available columns: {schema.names()}"
-            )
-
-        time = pl.coalesce(options) if len(options) > 1 else options[0]
-
-    # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
-    # Determine what to use for the `code` column                   #
-    # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
-
-    if is_canonical and canonical_code:
-        # Use the canonical code (MEDS_BIRTH, MEDS_DEATH, etc.)
-        code = pl.lit(canonical_code, dtype=pl.Utf8)
-    else:
-        # Check code_type to determine how to extract the code
-        code_type = table_config.get("code_type", "source_value").lower()
-
-        if code_type == "source_value":
-            # Use the source_value field directly (no mapping)
-            code_field = table_config.get("code_field", "").lower()
-            if not code_field or code_field not in schema.names():
+            # Use the OMOP table name + `_start_datetime` as the `time` column
+            # if it's available otherwise `_start_date`, `_datetime`, `_date`
+            # in that order of preference
+            # We prefer user defined time field options over the default time options if available
+            options = table_details.get("time_field_options", []) + [
+                table_name + "_start_datetime",
+                table_name + "_start_date",
+                table_name + "_datetime",
+                table_name + "_date",
+                # HACK -- last chance is to search for occurence in the column name
+                table_name + "_occurrence_datetime",
+                table_name + "_occurrence_date",
+            ]
+            options = [
+                cast_to_datetime(schema, option, move_to_end_of_day=True)
+                for option in options
+                if option in schema.names()
+            ]
+            # assert len(options) > 0, f"Could not find the time column {schema.names()}"
+            if not options:
                 raise ValueError(
-                    f"code_field '{code_field}' not found in schema for table '{table_name}'. "
-                    f"Available columns: {schema.names()}"
-                )
-            code = pl.col(code_field).cast(pl.Utf8)
-
-        elif code_type == "concept_id":
-            # Map concept_id to concept_code using the OMOP concept hierarchy
-            concept_id_field = table_config.get("concept_id_field", table_name + "_concept_id").lower()
-
-            if concept_id_field not in schema.names():
-                raise ValueError(
-                    f"concept_id_field '{concept_id_field}' not found in schema for table '{table_name}'. "
-                    f"Available columns: {schema.names()}"
+                    f"Could not find a valid time column for table '{table_name}'. "
+                    f"Expected one of: {table_details.get('time_field_options', []) + [f'{table_name}_start_datetime', f'{table_name}_start_date', f'{table_name}_datetime', f'{table_name}_date']} "
+                    f"but found only these schema columns: {schema.names()}"
                 )
 
+            time = pl.coalesce(options)
+
+        # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+        # Determine what to use for the `code` column                   #
+        # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+        if table_details.get("force_concept_code"):
+            # Rather than getting the concept ID from the source table, we use the concept ID
+            # passed in by the user eg `4083587` for `Birth`
+            source_concept_id = pl.lit(0, dtype=pl.Int64)
+            code = pl.lit(table_details.get("force_concept_code"), dtype=pl.Utf8)
+        else:
+            # Try using the source concept ID, but if it's not available then use the concept ID
+            concept_id_field = table_details.get("concept_id_field", table_name + "_concept_id")
             concept_id = pl.col(concept_id_field).cast(pl.Int64)
-
-            # Try to get source_concept_id if available (preferred)
-            source_concept_id_field = table_config.get("source_concept_id_field")
-            if source_concept_id_field:
-                source_concept_id_field = source_concept_id_field.lower()
-                if source_concept_id_field in schema.names():
-                    source_concept_id = pl.col(source_concept_id_field).cast(pl.Int64)
-                else:
-                    source_concept_id = pl.lit(0, dtype=pl.Int64)
+            if concept_id_field.replace("_concept_id", "_source_concept_id") in schema.names():
+                source_concept_id = pl.col(concept_id_field.replace("_concept_id", "_source_concept_id")).cast(pl.Int64)
             else:
-                # Try standard pattern: replace _concept_id with _source_concept_id
-                inferred_source = concept_id_field.replace("_concept_id", "_source_concept_id")
-                if inferred_source in schema.names():
-                    source_concept_id = pl.col(inferred_source).cast(pl.Int64)
-                else:
-                    source_concept_id = pl.lit(0, dtype=pl.Int64)
+                source_concept_id = pl.lit(0, dtype=pl.Int64)
 
-            # Fallback concept ID if both source and standard are 0
-            fallback_concept_id = pl.lit(table_config.get("fallback_concept_id", None), dtype=pl.Int64)
+            # And if the source concept ID and concept ID aren't available, use `fallback_concept_id`
+            fallback_concept_id = pl.lit(table_details.get("fallback_concept_id", None), dtype=pl.Int64)
 
-            # Prefer source_concept_id, then concept_id, then fallback
-            final_concept_id = (
+            concept_id = (
                 pl.when(source_concept_id != 0)
                 .then(source_concept_id)
                 .when(concept_id != 0)
@@ -292,104 +240,153 @@ def write_event_data(
                 .otherwise(fallback_concept_id)
             )
 
-            # Map concept IDs to concept codes using the concept_id_map
-            code = final_concept_id.replace_strict(concept_id_map, return_dtype=pl.Utf8(), default=None)
+            # Replace values in `concept_id` with the normalized concepts to which they are mapped
+            # based on the `concept_id_map`
+            code = concept_id.replace_strict(concept_id_map, return_dtype=pl.Utf8(), default=None)
 
-        else:
-            raise ValueError(
-                f"Unknown code_type '{code_type}' for table '{table_name}'. " f"Must be 'source_value' or 'concept_id'."
+        # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+        # Determine what to use for the `value`                       #
+        # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+        # By default, if the user doesn't specify in `table_details`
+        # what the
+        value = pl.lit(None, dtype=str)
+
+        if table_details.get("string_value_field"):
+            value = pl.col(table_details["string_value_field"])
+        if table_details.get("numeric_value_field"):
+            value = pl.coalesce(pl.col(table_details["numeric_value_field"]), value)
+
+        if table_details.get("concept_id_value_field"):
+            concept_id_value = pl.col(table_details["concept_id_value_field"]).cast(pl.Int64)
+
+            # Normally we would prefer string or numeric value.
+            # But sometimes we get a value_as_concept_id with no string or numeric value.
+            # So we want to define a backup value here
+            #
+            # There are two reasons for this, each with different desired behavior:
+            # 1. OMOP defines a code with a maps to value relationship.
+            #      See https://www.ohdsi.org/web/wiki/doku.php?id=documentation:vocabulary:mapping
+            #      In this cases we generally just want to drop the value, as the data is in source_concept_id
+            # 2. The ETL has decided to put non-maps to value codes in observation for various reasons.
+            #      For instance STARR-OMOP puts shc_medical_hx in here
+            #      In this case, we generally want to create a string value with the source code value.
+
+            backup_value = (
+                pl.when((source_concept_id == 0) & (concept_id_value != 0))
+                .then(
+                    # Source concept 0 indicates we need a backup value since it's not captured by the source
+                    "SOURCE_CODE/"
+                    + pl.col(concept_id_field.replace("_concept_id", "_source_value"))
+                )
+                .when(concept_id_value != 0)
+                .then("OMOP_CONCEPT_ID/" + concept_id_value.cast(pl.Utf8()))
+                .otherwise(pl.lit(None, dtype=pl.Utf8()))
             )
 
-    # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
-    # Determine what to use for the `value`                       #
-    # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+            value = pl.coalesce(value, backup_value)
 
-    # Extract numeric value if configured
-    numeric_value_field = table_config.get("numeric_value_field", "").lower()
-    text_value_field = table_config.get("text_value_field", "").lower()
+        # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+        # Determine the metadata columns                            #
+        # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
-    value = pl.lit(None, dtype=str)
+        # Every key in the `metadata` dictionary will become a distinct
+        # column in the MEDS file; for each event, the metadata column
+        # and its corresponding value for a given subject will be stored
+        # as event metadata in the MEDS representation
+        metadata = {
+            "table": pl.lit(table_name, dtype=str),
+        }
 
-    if text_value_field and text_value_field in schema.names():
-        value = pl.col(text_value_field)
+        if "visit_occurrence_id" in schema.names():
+            metadata["visit_id"] = pl.col("visit_occurrence_id")
 
-    if numeric_value_field and numeric_value_field in schema.names():
-        value = pl.coalesce(pl.col(numeric_value_field), value)
+        if "care_site_id" in schema.names():
+            metadata["care_site_id"] = pl.col("care_site_id")
 
-    # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
-    # Determine the metadata columns                            #
-    # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+        unit_columns = []
+        if "unit_source_value" in schema.names():
+            unit_columns.append(pl.col("unit_source_value"))
 
-    metadata = {
-        "table": pl.lit(table_name, dtype=str),
-    }
+        if "unit_concept_id" in schema.names():
+            unit_columns.append(
+                pl.col("unit_concept_id").replace_strict(concept_id_map, return_dtype=pl.Utf8(), default=None)
+            )
+        if unit_columns:
+            metadata["unit"] = pl.coalesce(unit_columns)
 
-    # Add end timestamp if configured
-    time_end_field = table_config.get("time_end_field", "").lower()
-    if time_end_field and time_end_field in schema.names():
-        end = cast_to_datetime(schema, time_end_field, move_to_end_of_day=True)
-        metadata["end"] = end
+        if "load_table_id" in schema.names():
+            metadata["clarity_table"] = pl.col("load_table_id")
 
-    # Add metadata fields from config
-    for meta_spec in table_config.get("metadata", []):
-        meta_name = meta_spec.get("name", "").lower()
-        meta_type = meta_spec.get("type", "string").lower()
+        if (table_name + "_end_datetime") in schema.names():
+            end = cast_to_datetime(schema, table_name + "_end_datetime", move_to_end_of_day=True)
+            metadata["end"] = end
 
-        if meta_name in schema.names():
-            # Cast to appropriate type
-            if meta_type in ["int", "integer", "int64"]:
-                metadata[meta_name] = pl.col(meta_name).cast(pl.Int64)
-            elif meta_type in ["float", "float64", "double"]:
-                metadata[meta_name] = pl.col(meta_name).cast(pl.Float64)
-            elif meta_type in ["string", "str", "text"]:
-                metadata[meta_name] = pl.col(meta_name).cast(pl.Utf8)
-            else:
-                metadata[meta_name] = pl.col(meta_name)
+        # unclear if these are needed
+        # ---------------------------
+        if "provider_id" in schema.names():
+            metadata["provider_id"] = pl.col("provider_id")
 
-    batch = batch.filter(code.is_not_null())
+        if "note_id" in schema.names():
+            metadata["note_id"] = pl.col("note_id")
 
-    columns = {
-        "subject_id": subject_id,
-        "time": time,
-        "code": code,
-    }
+        if "procedure_occurrence_id" in schema.names():
+            metadata["procedure_occurrence_id"] = pl.col("procedure_occurrence_id")
 
-    n, t = meds_etl.utils.convert_generic_value_to_specific(value)
+        if "image_occurrence_id" in schema.names():
+            metadata["image_occurrence_id"] = pl.col("image_occurrence_id")
+            metadata["image_series_uid"] = pl.col("image_series_uid")
+            metadata["image_study_uid"] = pl.col("image_study_uid")
+            metadata["_accession_number"] = pl.col("_accession_number")
+            metadata["local_path"] = pl.col("local_path")
+            metadata["wadors_uri"] = pl.col("wadors_uri")
+            metadata["anatomic_site_source_value"] = pl.col("anatomic_site_source_value")
+            metadata["modality_source_value"] = pl.col("modality_source_value")
+            metadata["procedure_occurrence_id"] = pl.col("procedure_occurrence_id")
+        # ---------------------------
 
-    columns["numeric_value"] = n
-    columns["text_value"] = t
+        batch = batch.filter(code.is_not_null())
 
-    # Add metadata columns to the set of MEDS dataframe columns
-    for k, v in metadata.items():
-        columns[k] = v.alias(k)
+        columns = {
+            "subject_id": subject_id,
+            "time": time,
+            "code": code,
+        }
 
-    event_data = batch.select(**columns)
-    # Write this part of the MEDS Unsorted file to disk
-    fname = os.path.join(path_to_MEDS_unsorted_dir, f'{table_name.replace("/", "_")}_{uuid.uuid4()}.parquet')
-    try:
-        event_data.collect(streaming=True).write_parquet(fname, compression="zstd", compression_level=1)
-    except pl.exceptions.InvalidOperationError as e:
-        print(table_name)
-        print(e)
-        print(event_data.explain(streaming=True))
-        raise e
+        n, t = meds_etl.utils.convert_generic_value_to_specific(value)
+
+        columns["numeric_value"] = n
+        columns["text_value"] = t
+
+        # Add metadata columns to the set of MEDS dataframe columns
+        for k, v in metadata.items():
+            columns[k] = v.alias(k)
+
+        event_data = batch.select(**columns)
+        # Write this part of the MEDS Unsorted file to disk
+        fname = os.path.join(path_to_MEDS_unsorted_dir, f'{table_name.replace("/", "_")}_{uuid.uuid4()}.parquet')
+        try:
+            event_data.collect(streaming=True).write_parquet(fname, compression="zstd", compression_level=1)
+        except pl.exceptions.InvalidOperationError as e:
+            print(table_name)
+            print(e)
+            print(event_data.explain(streaming=True))
+            raise e
 
 
 def process_table_csv(args):
     (
         table_file,
         table_name,
-        table_config,
+        all_table_details,
         concept_id_map_data,
         concept_name_map_data,
         path_to_MEDS_unsorted_dir,
         path_to_decompressed_dir,
-        primary_key,
-        is_canonical,
-        canonical_code,
         verbose,
     ) = args
     """
+
     This function is designed to be called through parallel processing utilities
     such as `pool.imap_unordered(process_table, [args1, args2, ..., argsN])
 
@@ -397,13 +394,20 @@ def process_table_csv(args):
         args (tuple): A tuple with the following elements:
             table_file (str): Path to the raw source table file (can be compressed)
             table_name (str): Name of the source table. Used for table-specific preprocessing
-            table_config (Dict): Configuration dictionary for this table
-            ...
+                and selecting columns which often have the table name embedded within them
+                such as `measurement_datetime` in the `measurement` table.
+            all_table_details (List[Dict[str, Any]]): A list of details about the particular
+                table being processed that help determine how to map from the raw OMOP data
+                to the MEDS standard.
+
     """
     concept_id_map = pickle.loads(concept_id_map_data)  # 0.25 GB for STARR-OMOP
     concept_name_map = pickle.loads(concept_name_map_data)  # 0.5GB for STARR-OMOP
     if verbose:
-        print("Working on ", table_file, table_name, table_config)
+        print("Working on ", table_file, table_name, all_table_details)
+
+    if not isinstance(all_table_details, list):
+        all_table_details = [all_table_details]
 
     # Load the source table, decompress if needed
     with load_file(path_to_decompressed_dir, table_file) as temp_f:
@@ -430,12 +434,9 @@ def process_table_csv(args):
                 path_to_MEDS_unsorted_dir,
                 lambda: batch.lazy(),
                 table_name,
-                table_config,
+                all_table_details,
                 concept_id_map,
                 concept_name_map,
-                primary_key,
-                is_canonical,
-                canonical_code,
             )
 
 
@@ -443,72 +444,45 @@ def process_table_parquet(args):
     (
         table_files,
         table_name,
-        table_config,
+        all_table_details,
         concept_id_map_data,
         concept_name_map_data,
         path_to_MEDS_unsorted_dir,
-        primary_key,
-        is_canonical,
-        canonical_code,
         verbose,
     ) = args
     """
+
     This function is designed to be called through parallel processing utilities
     such as `pool.imap_unordered(process_table, [args1, args2, ..., argsN])
 
     Args:
         args (tuple): A tuple with the following elements:
-            table_files (List[str]): Paths to the raw source table files
-            table_name (str): Name of the source table
-            table_config (Dict): Configuration dictionary for this table
-            ...
+            table_file (str): Path to the raw source table file (can be compressed)
+            table_name (str): Name of the source table. Used for table-specific preprocessing
+                and selecting columns which often have the table name embedded within them
+                such as `measurement_datetime` in the `measurement` table.
+            all_table_details (List[Dict[str, Any]]): A list of details about the particular
+                table being processed that help determine how to map from the raw OMOP data
+                to the MEDS standard.
+
     """
     concept_id_map = pickle.loads(concept_id_map_data)  # 0.25 GB for STARR-OMOP
     concept_name_map = pickle.loads(concept_name_map_data)  # 0.5GB for STARR-OMOP
     if verbose:
-        print("Working on ", table_files, table_name, table_config)
+        print("Working on ", table_files, table_name, all_table_details)
+
+    if not isinstance(all_table_details, list):
+        all_table_details = [all_table_details]
 
     # Load the source table, decompress if needed
     write_event_data(
         path_to_MEDS_unsorted_dir,
         lambda: pl.scan_parquet(table_files),
         table_name,
-        table_config,
+        all_table_details,
         concept_id_map,
         concept_name_map,
-        primary_key,
-        is_canonical,
-        canonical_code,
     )
-
-
-def load_config(config_path: str) -> Dict[str, Any]:
-    """Load ETL configuration from file
-
-    Args:
-        config_path: Path to configuration JSON file
-
-    Returns:
-        Configuration dictionary with primary_key, canonical_events, and tables
-    """
-    if not config_path or not os.path.exists(config_path):
-        raise ValueError(f"Configuration file required but not found: {config_path}")
-
-    print(f"Loading ETL configuration from {config_path}")
-    with open(config_path, "r") as f:
-        config = json.load(f)
-
-    # Validate required fields
-    if "primary_key" not in config:
-        raise ValueError("Configuration must include 'primary_key' field")
-
-    if "tables" not in config:
-        raise ValueError("Configuration must include 'tables' field (can be empty dict)")
-
-    if "canonical_events" not in config:
-        config["canonical_events"] = {}
-
-    return config
 
 
 def extract_metadata(path_to_src_omop_dir: str, path_to_decompressed_dir: str, verbose: int = 0) -> Tuple:
@@ -642,11 +616,6 @@ def main():
     )
     parser.add_argument("path_to_dest_meds_dir", type=str, help="Path to where the output MEDS files will be stored")
     parser.add_argument(
-        "config",
-        type=str,
-        help="Path to the ETL configuration JSON file.",
-    )
-    parser.add_argument(
         "--num_shards",
         type=int,
         default=100,
@@ -670,11 +639,8 @@ def main():
         help="If set, the job continues from a previous run, starting after the "
         "conversion to MEDS Unsorted but before converting from MEDS Unsorted to MEDS.",
     )
-    parser.add_argument(
-        "--force_refresh",
-        action="store_true",
-        help="If set, this will overwrite all previous MEDS data in the output dir.",
-    )
+    parser.add_argument("--force_refresh", action="store_true", help="If set, this will overwrite all previous MEDS data in the output dir.")
+    parser.add_argument("--omop_version", type=str, help="Switch between OMOP 5.3/5.4, default 5.4.")
     args = parser.parse_args()
 
     if not os.path.exists(args.path_to_src_omop_dir):
@@ -688,6 +654,12 @@ def main():
             shutil.rmtree(args.path_to_dest_meds_dir)
     os.makedirs(args.path_to_dest_meds_dir, exist_ok=True)
 
+    if not args.omop_version:
+        omop_version = "5.4"
+    else:
+        omop_version = args.omop_version
+    if omop_version not in ["5.4", "5.3"]:
+        raise RuntimeError(f"OMOP version {omop_version} not supported")
     # Within the target directory, create temporary subfolder for holding files
     # that need to be decompressed as part of the ETL (via eg `load_file`)
     path_to_decompressed_dir = os.path.join(args.path_to_dest_meds_dir, "decompressed")
@@ -743,50 +715,102 @@ def main():
         # Convert all "measurements" to MEDS Unsorted, write to disk  #
         # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
-        # Load ETL configuration
-        config = load_config(args.config)
-        primary_key = config["primary_key"]
+        tables: Dict[str, Any] = {
+            # Each key is a `table_name`
+            "person": [  # `table_name`s map to `table_details`
+                {
+                    "force_concept_code": meds.birth_code,
+                },
+                {
+                    "concept_id_field": "gender_concept_id",
+                },
+                {
+                    "concept_id_field": "race_concept_id",
+                },
+                {
+                    "concept_id_field": "ethnicity_concept_id",
+                },
+            ],
+            "drug_exposure": {
+                "concept_id_field": "drug_concept_id",
+            },
+            "visit": [
+                {"fallback_concept_id": DEFAULT_VISIT_CONCEPT_ID, "file_suffix": "occurrence"},
+                {
+                    "concept_id_field": "discharged_to_concept_id" if omop_version == "5.4" else "discharge_to_concept_id",
+                    "time_field_options": ["visit_end_datetime", "visit_end_date"],
+                    "file_suffix": "occurrence",
+                },
+            ],
+            "condition": {
+                "file_suffix": "occurrence",
+            },
+            "death": {
+                "force_concept_code": meds.death_code,
+            },
+            "procedure": {
+                "file_suffix": "occurrence",
+            },
+            # image_occurance table is an OMOP extension table
+            "image": [
+                {"force_concept_code": DEFAULT_IMAGE_CONCEPT_ID, "file_suffix": "occurrence"},
+                # {
+                #     "concept_id_field": "procedure_occurrence_id",
+                # },
+                # {
+                #     "concept_id_field": "visit_occurrence_id",
+                # },
+            ],
+            # ------
+            "device_exposure": {
+                "concept_id_field": "device_concept_id",
+            },
+            "measurement": {
+                "string_value_field": "value_source_value",
+                "numeric_value_field": "value_as_number",
+                "concept_id_value_field": "value_as_concept_id",
+            },
+            "observation": {
+                "string_value_field": "value_as_string",
+                "numeric_value_field": "value_as_number",
+                "concept_id_value_field": "value_as_concept_id",
+            },
+            "note": {
+                "fallback_concept_id": DEFAULT_NOTE_CONCEPT_ID,
+                "concept_id_field": "note_class_concept_id",
+                "string_value_field": "note_text",
+            },
+            "visit_detail": {
+                "fallback_concept_id": DEFAULT_VISIT_DETAIL_CONCEPT_ID,
+            },
+        }
 
         # Prepare concept_id_map and concept_name_map for parallel processing
         concept_id_map_data = pickle.dumps(concept_id_map)
         concept_name_map_data = pickle.dumps(concept_name_map)
 
-        # Create tasks for all tables
+        # Create a separate task for each table
+        # Each subprocess will read in a decompressed file and put all measurements for a given subject
+        # into that subject's corresponding shard. This makes creating subject timelines downstream
+        # (where timelines incorporate measurements from across different tables) much less RAM intensive.
         all_csv_tasks = []
         all_parquet_tasks = []
-
-        # First, process canonical events (BIRTH, DEATH, etc.)
-        for event_name, event_config in config.get("canonical_events", {}).items():
-            table_name = event_config["table"]
-            # Get canonical code from config, with fallback to defaults
-            if "code" in event_config:
-                canonical_code = event_config["code"]
-            else:
-                # Fallback to default codes
-                canonical_code = (
-                    meds.birth_code
-                    if event_name == "birth"
-                    else meds.death_code if event_name == "death" else f"MEDS_{event_name.upper()}"
-                )
-
+        for table_name, table_details in tables.items():
             csv_table_files, parquet_table_files = get_table_files(
                 path_to_src_omop_dir=args.path_to_src_omop_dir,
                 table_name=table_name,
-                table_details={},
+                table_details=table_details[0] if isinstance(table_details, list) else table_details,
             )
 
             all_csv_tasks.extend(
                 (
                     table_file,
                     table_name,
-                    event_config,
+                    table_details,
                     concept_id_map_data,
                     concept_name_map_data,
                     path_to_MEDS_unsorted_dir,
                     path_to_decompressed_dir,
-                    primary_key,
-                    True,  # is_canonical
-                    canonical_code,
                     args.verbose,
                 )
                 for table_file in csv_table_files
@@ -796,54 +820,10 @@ def main():
                 (
                     table_files,
                     table_name,
-                    event_config,
+                    table_details,
                     concept_id_map_data,
                     concept_name_map_data,
                     path_to_MEDS_unsorted_dir,
-                    primary_key,
-                    True,  # is_canonical
-                    canonical_code,
-                    args.verbose,
-                )
-                for table_files in split_list(parquet_table_files, args.num_shards)
-            )
-
-        # Then, process regular tables
-        for table_name, table_config in config.get("tables", {}).items():
-            csv_table_files, parquet_table_files = get_table_files(
-                path_to_src_omop_dir=args.path_to_src_omop_dir,
-                table_name=table_name,
-                table_details={},
-            )
-
-            all_csv_tasks.extend(
-                (
-                    table_file,
-                    table_name,
-                    table_config,
-                    concept_id_map_data,
-                    concept_name_map_data,
-                    path_to_MEDS_unsorted_dir,
-                    path_to_decompressed_dir,
-                    primary_key,
-                    False,  # is_canonical
-                    None,
-                    args.verbose,
-                )
-                for table_file in csv_table_files
-            )
-
-            all_parquet_tasks.extend(
-                (
-                    table_files,
-                    table_name,
-                    table_config,
-                    concept_id_map_data,
-                    concept_name_map_data,
-                    path_to_MEDS_unsorted_dir,
-                    primary_key,
-                    False,  # is_canonical
-                    None,
                     args.verbose,
                 )
                 for table_files in split_list(parquet_table_files, args.num_shards)
