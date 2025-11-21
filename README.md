@@ -8,8 +8,8 @@
   <a href="https://www.python.org/downloads/">
     <img src="https://img.shields.io/badge/python-%3E3.10-blue" alt="Python > 3.10">
   </a>
-  <a href="https://github.com/Medical-Event-Data-Standard/meds_etl/actions/workflows/test.yml">
-    <img src="https://github.com/Medical-Event-Data-Standard/meds_etl/actions/workflows/test.yml/badge.svg?branch=main" alt="Tests">
+  <a href="https://github.com/Medical-Event-Data-Standard/meds_etl/actions/workflows/python-test.yml">
+    <img src="https://github.com/Medical-Event-Data-Standard/meds_etl/actions/workflows/python-test.yml/badge.svg?branch=main" alt="Tests">
   </a>
   <img src="https://img.shields.io/badge/MEDS-0.3.3-blue" alt="MEDS 0.3.3">
   <a href="https://github.com/Medical-Event-Data-Standard/meds_etl/graphs/commit-activity">
