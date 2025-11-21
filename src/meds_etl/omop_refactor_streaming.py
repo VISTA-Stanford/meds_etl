@@ -39,6 +39,68 @@ from tqdm import tqdm
 # ============================================================================
 
 
+def _partition_file_worker(args):
+    """
+    Worker function to partition a single unsorted file into sorted runs.
+    
+    Returns a list of run counts per shard.
+    """
+    file_idx, unsorted_file, runs_dir, num_shards, chunk_rows, compression, verbose, low_memory = args
+    
+    run_counts = [0] * num_shards
+    
+    try:
+        # Read file (only once!) with low_memory flag
+        df = pl.read_parquet(unsorted_file, low_memory=low_memory)
+
+        if len(df) == 0:
+            return run_counts
+
+        # Add shard_id column
+        df = df.with_columns([(pl.col("subject_id") % num_shards).alias("_shard_id")])
+
+        # Partition to each shard
+        for shard_id in range(num_shards):
+            # Filter for this shard
+            shard_data = df.filter(pl.col("_shard_id") == shard_id).drop("_shard_id")
+
+            if len(shard_data) == 0:
+                continue
+
+            # Process in chunks if data is large
+            num_rows = len(shard_data)
+            num_chunks = (num_rows + chunk_rows - 1) // chunk_rows
+
+            for chunk_idx in range(num_chunks):
+                start_idx = chunk_idx * chunk_rows
+                end_idx = min((chunk_idx + 1) * chunk_rows, num_rows)
+
+                chunk = shard_data[start_idx:end_idx]
+
+                # Sort chunk
+                sorted_chunk = chunk.sort(["subject_id", "time"])
+
+                # Write as run
+                shard_dir = runs_dir / f"shard_{shard_id}"
+                run_file = shard_dir / f"run_{file_idx:05d}_{chunk_idx:05d}.parquet"
+                sorted_chunk.write_parquet(run_file, compression=compression)
+
+                run_counts[shard_id] += 1
+            
+            # Cleanup shard data
+            del shard_data
+        
+        # Cleanup file data and force garbage collection
+        del df
+        gc.collect()
+
+    except Exception as e:
+        if verbose:
+            print(f"\n  WARNING: Error processing {unsorted_file.name}: {e}")
+    
+    return run_counts
+
+
 def partition_to_sorted_runs(
     unsorted_dir: Path,
     runs_dir: Path,
@@ -47,9 +109,10 @@ def partition_to_sorted_runs(
     compression: str = "lz4",
     verbose: bool = False,
     low_memory: bool = True,
+    num_workers: int = 1,
 ) -> None:
     """
-    Stage 2.1: Partition unsorted data into sorted runs (OPTIMIZED).
+    Stage 2.1: Partition unsorted data into sorted runs (OPTIMIZED + PARALLEL).
 
     Reads each unsorted file ONCE and partitions to all shards:
     - Read unsorted file
@@ -60,9 +123,11 @@ def partition_to_sorted_runs(
     
     Args:
         low_memory: Use Polars low_memory mode for smaller batches
+        num_workers: Number of parallel workers for processing files
     """
-    print(f"\n[Stage 2.1] Creating sorted runs (optimized)...")
+    print(f"\n[Stage 2.1] Creating sorted runs (optimized + parallel)...")
     print(f"  Shards: {num_shards}")
+    print(f"  Workers: {num_workers}")
     print(f"  Chunk size: {chunk_rows:,} rows")
     print(f"  Strategy: Read-once partitioning")
 
@@ -82,69 +147,45 @@ def partition_to_sorted_runs(
 
     print(f"  Unsorted files: {len(unsorted_files)}")
 
-    # Track runs per shard
-    run_counts = [0] * num_shards
+    # Prepare worker arguments
+    worker_args = [
+        (file_idx, unsorted_file, runs_dir, num_shards, chunk_rows, compression, verbose, low_memory)
+        for file_idx, unsorted_file in enumerate(unsorted_files)
+    ]
 
-    # Process each file ONCE
-    for file_idx, unsorted_file in enumerate(tqdm(unsorted_files, desc="Partitioning files")):
-        try:
-            # Read file (only once!) with low_memory flag
-            df = pl.read_parquet(unsorted_file, low_memory=low_memory)
+    # Process files in parallel or sequentially
+    if num_workers == 1:
+        # Sequential processing
+        all_run_counts = []
+        for args in tqdm(worker_args, desc="Partitioning files"):
+            run_counts = _partition_file_worker(args)
+            all_run_counts.append(run_counts)
+    else:
+        # Parallel processing
+        import multiprocessing as mp
+        with mp.Pool(processes=num_workers) as pool:
+            all_run_counts = list(
+                tqdm(
+                    pool.imap_unordered(_partition_file_worker, worker_args),
+                    total=len(worker_args),
+                    desc="Partitioning files",
+                )
+            )
 
-            if len(df) == 0:
-                continue
-
-            # Add shard_id column
-            df = df.with_columns([(pl.col("subject_id") % num_shards).alias("_shard_id")])
-
-            # Partition to each shard
-            for shard_id in range(num_shards):
-                # Filter for this shard
-                shard_data = df.filter(pl.col("_shard_id") == shard_id).drop("_shard_id")
-
-                if len(shard_data) == 0:
-                    continue
-
-                # Process in chunks if data is large
-                num_rows = len(shard_data)
-                num_chunks = (num_rows + chunk_rows - 1) // chunk_rows
-
-                for chunk_idx in range(num_chunks):
-                    start_idx = chunk_idx * chunk_rows
-                    end_idx = min((chunk_idx + 1) * chunk_rows, num_rows)
-
-                    chunk = shard_data[start_idx:end_idx]
-
-                    # Sort chunk
-                    sorted_chunk = chunk.sort(["subject_id", "time"])
-
-                    # Write as run
-                    shard_dir = runs_dir / f"shard_{shard_id}"
-                    run_file = shard_dir / f"run_{file_idx:05d}_{chunk_idx:05d}.parquet"
-                    sorted_chunk.write_parquet(run_file, compression=compression)
-
-                    run_counts[shard_id] += 1
-                
-                # Cleanup shard data
-                del shard_data
-            
-            # Cleanup file data and force garbage collection
-            del df
-            gc.collect()
-
-        except Exception as e:
-            if verbose:
-                print(f"\n  WARNING: Error processing {unsorted_file.name}: {e}")
-            continue
+    # Aggregate run counts across all files
+    total_run_counts = [0] * num_shards
+    for run_counts in all_run_counts:
+        for shard_id in range(num_shards):
+            total_run_counts[shard_id] += run_counts[shard_id]
 
     # Always show run statistics (useful for debugging)
     print(f"\n  ✓ Partitioning complete")
-    print(f"  Total runs created: {sum(run_counts)}")
-    print(f"  Runs per shard (avg): {sum(run_counts) / num_shards:.1f}")
+    print(f"  Total runs created: {sum(total_run_counts)}")
+    print(f"  Runs per shard (avg): {sum(total_run_counts) / num_shards:.1f}")
 
     if verbose:
         print(f"\n  Detailed runs per shard:")
-        for shard_id, count in enumerate(run_counts):
+        for shard_id, count in enumerate(total_run_counts):
             print(f"    Shard {shard_id:3d}: {count:4d} runs")
 
 
@@ -236,6 +277,7 @@ def streaming_external_sort(
     run_merge: bool = True,
     low_memory: bool = True,
     row_group_size: int = 100_000,
+    num_workers: int = 1,
 ) -> None:
     """
     Complete streaming external sort using Polars 1.x.
@@ -250,6 +292,7 @@ def streaming_external_sort(
         merge_workers: Number of parallel merge workers (0=auto, 1=sequential, N=parallel)
         low_memory: Use Polars low_memory mode (smaller batches, less RAM)
         row_group_size: Rows per Parquet row group (smaller = less memory)
+        num_workers: Number of parallel workers for Stage 2.1 partitioning
     """
     print(f"\n" + "=" * 70)
     print("STAGE 2: STREAMING EXTERNAL SORT")
@@ -272,6 +315,7 @@ def streaming_external_sort(
             compression=run_compression,
             verbose=verbose,
             low_memory=low_memory,
+            num_workers=num_workers,
         )
     else:
         print("\nSkipping Stage 2.1 (partition)")
@@ -772,6 +816,7 @@ def run_omop_to_meds_streaming(
             run_merge=run_merge,
             low_memory=low_memory,
             row_group_size=row_group_size,
+            num_workers=num_workers,
         )
 
         stage2_elapsed = time.time() - stage2_start
@@ -852,7 +897,7 @@ if __name__ == "__main__":
         "--row_group_size",
         type=int,
         default=100_000,
-        help="Rows per Parquet row group. Smaller = less memory. (default: 100000)",
+        help="Rows per Parquet row group. Smaller = less memory. (default: 100_000)",
     )
     memory_group.add_argument(
         "--polars_threads",
