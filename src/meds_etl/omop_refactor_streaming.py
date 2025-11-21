@@ -15,6 +15,8 @@ from pathlib import Path
 import shutil
 from typing import Optional
 import polars as pl
+import os
+import gc
 
 # Import Stage 1 from omop_refactor.py
 import sys
@@ -44,6 +46,7 @@ def partition_to_sorted_runs(
     chunk_rows: int = 10_000_000,
     compression: str = "lz4",
     verbose: bool = False,
+    low_memory: bool = True,
 ) -> None:
     """
     Stage 2.1: Partition unsorted data into sorted runs (OPTIMIZED).
@@ -54,6 +57,9 @@ def partition_to_sorted_runs(
     - For each shard: filter, sort, write run
 
     This is much faster than reading each file N times (once per shard).
+    
+    Args:
+        low_memory: Use Polars low_memory mode for smaller batches
     """
     print(f"\n[Stage 2.1] Creating sorted runs (optimized)...")
     print(f"  Shards: {num_shards}")
@@ -71,7 +77,7 @@ def partition_to_sorted_runs(
     unsorted_files = sorted(unsorted_dir.glob("*.parquet"))
 
     if not unsorted_files:
-        print(f"  ⚠️  No unsorted files found")
+        print(f"  WARNING: No unsorted files found")
         return
 
     print(f"  Unsorted files: {len(unsorted_files)}")
@@ -82,8 +88,8 @@ def partition_to_sorted_runs(
     # Process each file ONCE
     for file_idx, unsorted_file in enumerate(tqdm(unsorted_files, desc="Partitioning files")):
         try:
-            # Read file (only once!)
-            df = pl.read_parquet(unsorted_file)
+            # Read file (only once!) with low_memory flag
+            df = pl.read_parquet(unsorted_file, low_memory=low_memory)
 
             if len(df) == 0:
                 continue
@@ -118,10 +124,17 @@ def partition_to_sorted_runs(
                     sorted_chunk.write_parquet(run_file, compression=compression)
 
                     run_counts[shard_id] += 1
+                
+                # Cleanup shard data
+                del shard_data
+            
+            # Cleanup file data and force garbage collection
+            del df
+            gc.collect()
 
         except Exception as e:
             if verbose:
-                print(f"\n  ⚠️  Error processing {unsorted_file.name}: {e}")
+                print(f"\n  WARNING: Error processing {unsorted_file.name}: {e}")
             continue
 
     # Always show run statistics (useful for debugging)
@@ -140,6 +153,8 @@ def streaming_merge_shard(
     output_file: Path,
     compression: str = "zstd",
     verbose: bool = False,
+    low_memory: bool = True,
+    row_group_size: int = 100_000,
 ) -> int:
     """
     Stage 2.2: Streaming merge of sorted runs using Polars.
@@ -151,25 +166,37 @@ def streaming_merge_shard(
     - Sink to output (streaming write)
 
     This is memory-bounded and efficient (native Rust implementation).
+    
+    Args:
+        low_memory: Use Polars low_memory mode for smaller batches
+        row_group_size: Rows per row group in output Parquet (smaller = less memory)
     """
     run_files = sorted(shard_dir.glob("run_*.parquet"))
 
     if not run_files:
         return 0
 
-    # Lazy scan all runs
-    scans = [pl.scan_parquet(str(f)) for f in run_files]
+    # Lazy scan all runs with low_memory flag
+    scans = [pl.scan_parquet(str(f), low_memory=low_memory) for f in run_files]
 
     # Concat + sort + streaming sink
     # Polars automatically uses streaming k-way merge here!
     (
         pl.concat(scans, how="vertical")
         .sort(["subject_id", "time"])
-        .sink_parquet(str(output_file), compression=compression, maintain_order=True)  # Important for sorted output
+        .sink_parquet(
+            str(output_file), 
+            compression=compression, 
+            maintain_order=True,  # Important for sorted output
+            row_group_size=row_group_size,  # Control memory usage
+        )
     )
 
     # Get row count
     row_count = pl.scan_parquet(output_file).select(pl.len()).collect().item()
+    
+    # Force garbage collection
+    gc.collect()
 
     return row_count
 
@@ -179,8 +206,20 @@ def _merge_shard_worker(args):
     Worker function for parallel shard merging.
     Must be at module level to be picklable by multiprocessing.
     """
-    shard_dir, output_file, compression = args
-    rows = streaming_merge_shard(shard_dir, output_file, compression=compression, verbose=False)
+    shard_dir, output_file, compression, low_memory, row_group_size = args
+    
+    rows = streaming_merge_shard(
+        shard_dir, 
+        output_file, 
+        compression=compression, 
+        verbose=False,
+        low_memory=low_memory,
+        row_group_size=row_group_size,
+    )
+    
+    # Explicit cleanup
+    gc.collect()
+    
     return rows
 
 
@@ -195,6 +234,8 @@ def streaming_external_sort(
     verbose: bool = False,
     run_partition: bool = True,
     run_merge: bool = True,
+    low_memory: bool = True,
+    row_group_size: int = 100_000,
 ) -> None:
     """
     Complete streaming external sort using Polars 1.x.
@@ -207,6 +248,8 @@ def streaming_external_sort(
 
     Args:
         merge_workers: Number of parallel merge workers (0=auto, 1=sequential, N=parallel)
+        low_memory: Use Polars low_memory mode (smaller batches, less RAM)
+        row_group_size: Rows per Parquet row group (smaller = less memory)
     """
     print(f"\n" + "=" * 70)
     print("STAGE 2: STREAMING EXTERNAL SORT")
@@ -228,26 +271,27 @@ def streaming_external_sort(
             chunk_rows=chunk_rows,
             compression=run_compression,
             verbose=verbose,
+            low_memory=low_memory,
         )
     else:
-        print("\n⏩ Skipping Stage 2.1 (partition)")
+        print("\nSkipping Stage 2.1 (partition)")
         # Check if runs exist
         if not runs_dir.exists():
-            print(f"❌ ERROR: No runs found at {runs_dir}")
-            print(f"   Run with --pipeline partition first!")
+            print(f"ERROR: No runs found at {runs_dir}")
+            print(f"  Run with --pipeline partition first!")
             sys.exit(1)
 
     # Stage 2.2: Streaming merge per shard
     total_rows = 0
 
     if run_merge:
-        # Prepare merge tasks (include compression in args)
+        # Prepare merge tasks (include all memory config in args)
         merge_tasks = []
         for shard_id in range(num_shards):
             shard_dir = runs_dir / f"shard_{shard_id}"
             if shard_dir.exists():
                 output_file = final_dir / f"{shard_id}.parquet"
-                merge_tasks.append((shard_dir, output_file, final_compression))
+                merge_tasks.append((shard_dir, output_file, final_compression, low_memory, row_group_size))
 
         # Determine number of workers
         import multiprocessing as mp
@@ -284,7 +328,7 @@ def streaming_external_sort(
         if run_partition:  # Only cleanup if we created the runs in this session
             shutil.rmtree(runs_dir)
     else:
-        print("\n⏩ Skipping Stage 2.2 (merge)")
+        print("\nSkipping Stage 2.2 (merge)")
 
     stage2_elapsed = time.time() - stage2_start
 
@@ -300,13 +344,13 @@ def streaming_external_sort(
 
     # Per-shard breakdown
     if verbose:
-        print(f"\n📊 Per-shard breakdown:")
+        print(f"\nPer-shard breakdown:")
         for shard_id in range(num_shards):
             output_file = final_dir / f"{shard_id}.parquet"
             if output_file.exists():
                 size_mb = output_file.stat().st_size / 1024 / 1024
                 rows = pl.scan_parquet(output_file).select(pl.len()).collect().item()
-                print(f"   Shard {shard_id:3d}: {rows:12,} rows  ({size_mb:8.1f} MB)")
+                print(f"  Shard {shard_id:3d}: {rows:12,} rows  ({size_mb:8.1f} MB)")
 
     print("=" * 70)
 
@@ -330,6 +374,12 @@ def run_omop_to_meds_streaming(
     final_compression: str = "zstd",
     merge_workers: int = 0,
     pipeline_stages: str = "all",
+    # Memory configuration
+    low_memory: bool = False,
+    row_group_size: int = 100_000,
+    polars_threads: Optional[int] = None,
+    rayon_threads: Optional[int] = None,
+    process_method: str = "spawn",
 ):
     """
     Run OMOP to MEDS ETL with streaming external sort.
@@ -346,7 +396,70 @@ def run_omop_to_meds_streaming(
             - "partition": Only partition to sorted runs (Stage 2.1)
             - "merge": Only merge runs (Stage 2.2)
             - "sort": Run both partition + merge (Stage 2)
+        
+        Memory Configuration:
+            low_memory: Use Polars low_memory mode (smaller batches, less RAM). 
+                       Default False. Enable with --low_memory for 32-64GB laptops.
+            row_group_size: Rows per Parquet row group. Smaller = less memory.
+                           Default 100k (good for 32-64GB laptops).
+            polars_threads: Max threads for Polars (None = use env var, 1 = single-threaded).
+                           Overrides POLARS_MAX_THREADS env var.
+            rayon_threads: Max threads for Rayon (None = use env var, 1 = single-threaded).
+                          Overrides RAYON_NUM_THREADS env var.
+            process_method: Multiprocessing start method ('spawn' or 'fork'). 
+                           Default 'spawn' for better memory isolation.
+                           'fork' is faster but can cause memory bloat.
+                           CRITICAL: Must be set early to prevent deadlocks on Linux.
     """
+    # ========================================================================
+    # CONFIGURE MULTIPROCESSING AND THREADING (MUST BE FIRST!)
+    # ========================================================================
+    # CRITICAL: This MUST happen before ANY multiprocessing operations,
+    # including prescan_concept_ids() which creates its own pool.
+    # On Linux, default 'fork' + Polars threads = deadlock.
+    # On Mac, default is already 'spawn' so this prevents Linux hangs.
+    
+    import multiprocessing as mp
+    
+    # Set multiprocessing start method FIRST
+    try:
+        mp.set_start_method(process_method, force=True)
+        if verbose:
+            print(f"Multiprocessing method: '{process_method}' (critical for Linux stability)")
+    except RuntimeError:
+        # Already set - check if it matches
+        current_method = mp.get_start_method()
+        if current_method != process_method and verbose:
+            print(f"Warning: multiprocessing method already set to '{current_method}' (requested '{process_method}')")
+        elif verbose:
+            print(f"Multiprocessing method: '{current_method}' (already set)")
+    
+    # Configure Polars threading (CLI args override environment variables)
+    if polars_threads is not None:
+        os.environ["POLARS_MAX_THREADS"] = str(polars_threads)
+        if verbose:
+            print(f"Set POLARS_MAX_THREADS={polars_threads} (overriding env var)")
+    elif "POLARS_MAX_THREADS" not in os.environ:
+        # Default: single-threaded per worker for multiprocessing
+        os.environ["POLARS_MAX_THREADS"] = "1"
+        if verbose:
+            print(f"Set POLARS_MAX_THREADS=1 (default for multiprocessing)")
+    
+    # Configure Rayon threading (used by Polars internally)
+    if rayon_threads is not None:
+        os.environ["RAYON_NUM_THREADS"] = str(rayon_threads)
+        if verbose:
+            print(f"Set RAYON_NUM_THREADS={rayon_threads} (overriding env var)")
+    elif "RAYON_NUM_THREADS" not in os.environ:
+        # Default: single-threaded per worker
+        os.environ["RAYON_NUM_THREADS"] = "1"
+        if verbose:
+            print(f"Set RAYON_NUM_THREADS=1 (default for multiprocessing)")
+    
+    # ========================================================================
+    # PARSE PIPELINE STAGES
+    # ========================================================================
+    
     # Parse pipeline stages
     stages_to_run = set()
     if pipeline_stages == "all":
@@ -430,20 +543,26 @@ def run_omop_to_meds_streaming(
         concept_df, code_metadata = build_concept_map(omop_dir, verbose=verbose)
 
         if len(concept_df) == 0:
-            print(f"\n❌ ERROR: concept_id mapping requested but concept table not found!")
+            print(f"\nERROR: concept_id mapping requested but concept table not found!")
             sys.exit(1)
 
-        print(f"  ✅ Loaded {len(concept_df):,} concepts")
+        print(f"  Loaded {len(concept_df):,} concepts")
 
         # Optimize if requested
         if optimize_concepts:
             original_size = len(concept_df)
+            
+            if verbose:
+                print(f"\nOptimizing concept map (pre-scanning data to find used concepts)...")
+                print(f"  Using {num_workers} workers to scan OMOP files")
+                print(f"  (If this hangs on Linux, ensure --process_method spawn is set)")
+            
             used_concept_ids = prescan_concept_ids(omop_dir, config, num_workers, verbose=verbose)
 
             if used_concept_ids:
                 concept_df = concept_df.filter(pl.col("concept_id").is_in(list(used_concept_ids)))
                 if verbose:
-                    print(f"  ✅ Optimized: {original_size:,} → {len(concept_df):,} concepts")
+                    print(f"  Optimized: {original_size:,} -> {len(concept_df):,} concepts")
 
     concept_df_data = pickle.dumps(concept_df)
 
@@ -533,9 +652,7 @@ def run_omop_to_meds_streaming(
         stage1_start = time.time()
 
         if num_workers > 1:
-            import os
-
-            os.environ["POLARS_MAX_THREADS"] = "1"
+            # Thread config already set globally above
             with mp.Pool(processes=num_workers) as pool:
                 results = list(
                     tqdm(
@@ -571,7 +688,7 @@ def run_omop_to_meds_streaming(
         print(f"Time:             {stage1_elapsed:.2f}s")
 
         # Detailed breakdown by table
-        print(f"\n📊 Per-table breakdown:")
+        print(f"\nPer-table breakdown:")
         by_table = {}
         for r in successes:
             table = r.get("table", "unknown")
@@ -597,30 +714,35 @@ def run_omop_to_meds_streaming(
         for table, stats in sorted(by_table.items(), key=lambda x: x[1]["input"], reverse=True):
             retention = 100 * stats["output"] / stats["input"] if stats["input"] > 0 else 0
             mapping_used = stats["code_mapping_used"]
+            
+            # Simplify display: if using template, just show "template" regardless of base strategy
+            if "+template" in mapping_used:
+                mapping_used = "template"
+            
             print(
-                f"   {table:25s} [{mapping_used:15s}]  {stats['files']:3d} files  "
-                f"{stats['input']:10,} → {stats['output']:10,} rows ({retention:5.1f}%)"
+                f"   {table:30s} [{mapping_used:20s}] {stats['files']:4d} files  "
+                f"{stats['input']:>13,} -> {stats['output']:>13,} rows ({retention:5.1f}%)"
             )
 
         if failures:
-            print(f"\n⚠️  {len(failures)} files failed:")
+            print(f"\nWARNING: {len(failures)} files failed:")
             for f in failures[:10]:  # Show first 10
-                print(f"   - {f.get('table', 'unknown'):20s} / {f['file']}: {f.get('error', 'Unknown error')}")
+                print(f"  - {f.get('table', 'unknown'):20s} / {f['file']}: {f.get('error', 'Unknown error')}")
 
         # Check what was actually written to disk
         written_files = list(unsorted_dir.glob("*.parquet"))
-        print(f"\n💾 Files written to {unsorted_dir}:")
-        print(f"   Total files: {len(written_files)}")
+        print(f"\nFiles written to {unsorted_dir}:")
+        print(f"  Total files: {len(written_files)}")
         if len(written_files) > 0:
             total_size = sum(f.stat().st_size for f in written_files) / 1024 / 1024
-            print(f"   Total size:  {total_size:.1f} MB")
+            print(f"  Total size:  {total_size:.1f} MB")
         print(f"{'=' * 70}")
     else:
-        print("\n⏩ Skipping Stage 1 (transform)")
+        print("\nSkipping Stage 1 (transform)")
         # Check if unsorted data exists
         if not unsorted_dir.exists() or not list(unsorted_dir.glob("*.parquet")):
-            print(f"❌ ERROR: No unsorted data found at {unsorted_dir}")
-            print(f"   Run with --pipeline transform first!")
+            print(f"ERROR: No unsorted data found at {unsorted_dir}")
+            print(f"  Run with --pipeline transform first!")
             sys.exit(1)
 
     # ========================================================================
@@ -648,11 +770,13 @@ def run_omop_to_meds_streaming(
             verbose=verbose,
             run_partition=run_partition,
             run_merge=run_merge,
+            low_memory=low_memory,
+            row_group_size=row_group_size,
         )
 
         stage2_elapsed = time.time() - stage2_start
     else:
-        print("\n⏩ Skipping Stage 2 (sort)")
+        print("\nSkipping Stage 2 (sort)")
 
     # Cleanup temp
     print(f"\nCleaning up temporary directory...")
@@ -715,6 +839,40 @@ if __name__ == "__main__":
         default=0,
         help="Merge workers (0=auto/half cores, 1=sequential/low memory, N=parallel)",
     )
+    
+    # Memory configuration arguments
+    memory_group = parser.add_argument_group("Memory Configuration", 
+                                              "Control memory usage and profiling (important for laptops)")
+    memory_group.add_argument(
+        "--low_memory",
+        action="store_true",
+        help="Enable Polars low_memory mode (smaller batches, less RAM). Recommended for 32-64GB laptops.",
+    )
+    memory_group.add_argument(
+        "--row_group_size",
+        type=int,
+        default=100_000,
+        help="Rows per Parquet row group. Smaller = less memory. (default: 100000)",
+    )
+    memory_group.add_argument(
+        "--polars_threads",
+        type=int,
+        default=None,
+        help="Max threads for Polars (overrides POLARS_MAX_THREADS env var). Default: 1 for multiprocessing",
+    )
+    memory_group.add_argument(
+        "--rayon_threads",
+        type=int,
+        default=None,
+        help="Max threads for Rayon (overrides RAYON_NUM_THREADS env var). Default: 1 for multiprocessing",
+    )
+    memory_group.add_argument(
+        "--process_method",
+        choices=["spawn", "fork"],
+        default="spawn",
+        help="Multiprocessing start method. 'spawn' = better memory isolation (default), 'fork' = faster startup",
+    )
+    
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--no-optimize-concepts", dest="optimize_concepts", action="store_false")
 
@@ -734,4 +892,10 @@ if __name__ == "__main__":
         final_compression=args.final_compression,
         merge_workers=args.merge_workers,
         pipeline_stages=args.pipeline,
+        # Memory configuration
+        low_memory=args.low_memory,
+        row_group_size=args.row_group_size,
+        polars_threads=args.polars_threads,
+        rayon_threads=args.rayon_threads,
+        process_method=args.process_method,
     )

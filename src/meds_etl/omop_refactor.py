@@ -668,6 +668,64 @@ def find_omop_table_files(omop_dir: Path, table_name: str) -> List[Path]:
 # ============================================================================
 
 
+def apply_transforms(expr: pl.Expr, transforms: list) -> pl.Expr:
+    """
+    Apply a list of transformations to a Polars expression.
+    
+    Supported transforms:
+    - {"type": "replace", "pattern": "X", "replacement": "Y"} - Replace substring
+    - {"type": "regex_replace", "pattern": "X", "replacement": "Y"} - Regex replace
+    - {"type": "lower"} - Convert to lowercase
+    - {"type": "upper"} - Convert to uppercase
+    - {"type": "strip"} - Strip whitespace
+    - {"type": "strip_chars", "characters": "X"} - Strip specific characters
+    
+    Args:
+        expr: Polars expression to transform
+        transforms: List of transform dictionaries
+        
+    Returns:
+        Transformed Polars expression
+    """
+    for transform in transforms:
+        transform_type = transform.get("type")
+        
+        if transform_type == "replace":
+            # Simple string replacement
+            pattern = transform.get("pattern", "")
+            replacement = transform.get("replacement", "")
+            expr = expr.str.replace_all(pattern, replacement, literal=True)
+            
+        elif transform_type == "regex_replace":
+            # Regex replacement
+            pattern = transform.get("pattern", "")
+            replacement = transform.get("replacement", "")
+            expr = expr.str.replace_all(pattern, replacement, literal=False)
+            
+        elif transform_type == "lower":
+            # Convert to lowercase
+            expr = expr.str.to_lowercase()
+            
+        elif transform_type == "upper":
+            # Convert to uppercase
+            expr = expr.str.to_uppercase()
+            
+        elif transform_type == "strip":
+            # Strip leading/trailing whitespace
+            expr = expr.str.strip_chars()
+            
+        elif transform_type == "strip_chars":
+            # Strip specific characters
+            characters = transform.get("characters", "")
+            expr = expr.str.strip_chars(characters)
+            
+        else:
+            # Unknown transform type - skip
+            pass
+    
+    return expr
+
+
 def transform_to_meds_unsorted(
     df: pl.DataFrame,
     table_config: Dict,
@@ -771,7 +829,14 @@ def transform_to_meds_unsorted(
                 elif part:
                     exprs.append(pl.lit(part))
 
-            base_exprs.append(pl.concat_str(exprs).alias("code"))
+            # Build initial code expression
+            code_expr = pl.concat_str(exprs)
+            
+            # Apply transforms if specified
+            transforms = source_value_config.get("transforms", [])
+            code_expr = apply_transforms(code_expr, transforms)
+            
+            base_exprs.append(code_expr.alias("code"))
 
         elif "field" in source_value_config:
             # Direct field copy
@@ -801,7 +866,14 @@ def transform_to_meds_unsorted(
                 elif part:
                     exprs.append(pl.lit(part))
 
-            base_exprs.append(pl.concat_str(exprs).alias("code"))
+            # Build initial code expression
+            code_expr = pl.concat_str(exprs)
+            
+            # Apply transforms if specified
+            transforms = concept_config.get("transforms", [])
+            code_expr = apply_transforms(code_expr, transforms)
+            
+            base_exprs.append(code_expr.alias("code"))
 
         else:
             # Standard concept_id mapping with concept table lookup

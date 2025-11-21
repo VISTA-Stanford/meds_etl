@@ -310,7 +310,7 @@ def validate_config_against_data(omop_dir: Path, config: Dict, verbose: bool = F
                     import re
                     template = code_mappings["template"]
                     if isinstance(template, dict):
-                        template_str = template.get("format", "")
+                        template_str = template.get("format", template.get("template", ""))
                     else:
                         template_str = template
                     
@@ -770,6 +770,64 @@ def find_omop_table_files(omop_dir: Path, table_name: str) -> List[Path]:
 # ============================================================================
 
 
+def apply_transforms(expr: pl.Expr, transforms: list) -> pl.Expr:
+    """
+    Apply a list of transformations to a Polars expression.
+    
+    Supported transforms:
+    - {"type": "replace", "pattern": "X", "replacement": "Y"} - Replace substring
+    - {"type": "regex_replace", "pattern": "X", "replacement": "Y"} - Regex replace
+    - {"type": "lower"} - Convert to lowercase
+    - {"type": "upper"} - Convert to uppercase
+    - {"type": "strip"} - Strip whitespace
+    - {"type": "strip_chars", "characters": "X"} - Strip specific characters
+    
+    Args:
+        expr: Polars expression to transform
+        transforms: List of transform dictionaries
+        
+    Returns:
+        Transformed Polars expression
+    """
+    for transform in transforms:
+        transform_type = transform.get("type")
+        
+        if transform_type == "replace":
+            # Simple string replacement
+            pattern = transform.get("pattern", "")
+            replacement = transform.get("replacement", "")
+            expr = expr.str.replace_all(pattern, replacement, literal=True)
+            
+        elif transform_type == "regex_replace":
+            # Regex replacement
+            pattern = transform.get("pattern", "")
+            replacement = transform.get("replacement", "")
+            expr = expr.str.replace_all(pattern, replacement, literal=False)
+            
+        elif transform_type == "lower":
+            # Convert to lowercase
+            expr = expr.str.to_lowercase()
+            
+        elif transform_type == "upper":
+            # Convert to uppercase
+            expr = expr.str.to_uppercase()
+            
+        elif transform_type == "strip":
+            # Strip leading/trailing whitespace
+            expr = expr.str.strip_chars()
+            
+        elif transform_type == "strip_chars":
+            # Strip specific characters
+            characters = transform.get("characters", "")
+            expr = expr.str.strip_chars(characters)
+            
+        else:
+            # Unknown transform type - skip
+            pass
+    
+    return expr
+
+
 def transform_to_meds(
     df: pl.DataFrame,
     table_config: Dict,
@@ -834,9 +892,14 @@ def transform_to_meds(
             # Strategy B: Template-based code construction (vectorized string operations)
             template = code_mappings["template"]
             if isinstance(template, dict):
-                template_str = template.get("format", "")
+                # New format: {"format": "...", "transforms": [...]}
+                # Or legacy compatibility: {"template": "..."}
+                template_str = template.get("format", template.get("template", ""))
+                transforms = template.get("transforms", [])
             else:
+                # Legacy format: template is a string directly
                 template_str = template
+                transforms = []
             
             # Parse template to extract field references: {field_name}
             import re
@@ -864,12 +927,21 @@ def transform_to_meds(
                 
                 if concat_parts:
                     code_expr = pl.concat_str(concat_parts)
+                    
+                    # Apply transforms if specified
+                    code_expr = apply_transforms(code_expr, transforms)
+                    
                     select_exprs.append(code_expr.alias("code"))
                 else:
                     select_exprs.append(pl.lit(None, dtype=pl.Utf8).alias("code"))
             else:
                 # No field references, just use literal
-                select_exprs.append(pl.lit(template_str).alias("code"))
+                code_expr = pl.lit(template_str)
+                
+                # Apply transforms if specified
+                code_expr = apply_transforms(code_expr, transforms)
+                
+                select_exprs.append(code_expr.alias("code"))
         
         elif "source_value" in code_mappings:
             # Strategy C: Direct field mapping
@@ -1030,12 +1102,16 @@ def process_file(
 
 def partition_worker(args: Tuple) -> Dict:
     """
-    Worker for Stage 1 - partition into shards using DataFrame accumulation.
+    Simplified partition worker with clear memory model.
     
-    Key improvements:
-    - No dict serialization (keep DataFrames)
-    - Vectorized hash partitioning
-    - Memory-conscious buffering with total row tracking
+    Memory model:
+    - Worker has N shard buffers (one per shard)
+    - Each shard buffer holds up to K rows (rows_per_run) before flushing
+    - Input DataFrames are chunked and distributed to buffers
+    
+    Result:
+    - Predictable memory: ≈ K rows × N shards × row_size
+    - Consistent output: each file ≈ K rows
     """
     (
         worker_id,
@@ -1051,28 +1127,41 @@ def partition_worker(args: Tuple) -> Dict:
     ) = args
 
     start_time = time.time()
+    primary_key = config["primary_key"]
     
-    # Buffers: Dict[shard_id, List[DataFrame]]
+    # Per-shard state
     shard_buffers = {i: [] for i in range(num_shards)}
     shard_row_counts = {i: 0 for i in range(num_shards)}
+    shard_file_nums = {i: 0 for i in range(num_shards)}
     
-    run_sequence = 0
     rows_processed = 0
     files_processed = 0
-    total_buffered_rows = 0  # Track total across all shards
 
-    primary_key = config["primary_key"]
-
-    for table_name, file_path, table_config, is_canonical, event_name in file_batch:
-        file_start_time = time.time()
-        
-        try:
-            # Determine fixed_code for canonical events
-            fixed_code = None
-            if is_canonical:
-                fixed_code = table_config.get("code", f"MEDS_{event_name.upper()}")
+    def flush_shard(shard_id: int):
+        """Flush one shard buffer to disk."""
+        if not shard_buffers[shard_id]:
+            return
             
-            # Process file
+        flush_shard_buffer(
+            shard_id=shard_id,
+            dataframes=shard_buffers[shard_id],
+            temp_dir=temp_dir,
+            worker_id=worker_id,
+            run_seq=shard_file_nums[shard_id],
+            meds_schema=meds_schema,
+            compression=compression,
+        )
+        
+        shard_buffers[shard_id] = []
+        shard_row_counts[shard_id] = 0
+        shard_file_nums[shard_id] += 1
+
+    # Process files
+    for table_name, file_path, table_config, is_canonical, event_name in file_batch:
+        try:
+            # Read and transform to final schema
+            fixed_code = table_config.get("code", f"MEDS_{event_name.upper()}") if is_canonical else None
+            
             df = process_file(
                 file_path=file_path,
                 table_config=table_config,
@@ -1088,40 +1177,32 @@ def partition_worker(args: Tuple) -> Dict:
             
             rows_processed += len(df)
             
-            # Hash partitioning (efficient single-pass)
+            # Hash partition
             df = df.with_columns(
                 hash_subject_id_vectorized(pl.col("subject_id"), num_shards).alias("_shard_id")
             )
             
-            # Efficient partitioning: group by shard_id in ONE pass (not N filters!)
-            for shard_id, shard_df in df.group_by("_shard_id", maintain_order=False):
-                shard_id_value = shard_id[0]  # Extract scalar from tuple
+            # Distribute to shard buffers with chunking
+            for shard_id_tuple, shard_df in df.group_by("_shard_id", maintain_order=False):
+                shard_id = shard_id_tuple[0]
                 shard_df = shard_df.drop("_shard_id")
                 
-                shard_buffers[shard_id_value].append(shard_df)
-                shard_row_counts[shard_id_value] += len(shard_df)
-                total_buffered_rows += len(shard_df)
-            
-            # Flush if TOTAL buffered rows exceed threshold
-            if total_buffered_rows >= rows_per_run:
-                # Only flush shards with data (avoid iterating empty shards)
-                active_shards = [sid for sid, buf in shard_buffers.items() if buf]
+                # Chunk to fit buffer
+                offset = 0
+                total_rows = len(shard_df)
                 
-                for shard_id in active_shards:
-                    flush_shard_buffer(
-                        shard_id, 
-                        shard_buffers[shard_id], 
-                        temp_dir, 
-                        worker_id, 
-                        run_sequence, 
-                        meds_schema, 
-                        compression
-                    )
-                    shard_buffers[shard_id] = []
-                    shard_row_counts[shard_id] = 0
-                
-                run_sequence += 1
-                total_buffered_rows = 0
+                while offset < total_rows:
+                    space_left = rows_per_run - shard_row_counts[shard_id]
+                    chunk_size = min(space_left, total_rows - offset)
+                    chunk = shard_df.slice(offset, chunk_size)
+                    
+                    shard_buffers[shard_id].append(chunk)
+                    shard_row_counts[shard_id] += chunk_size
+                    offset += chunk_size
+                    
+                    # Flush when full
+                    if shard_row_counts[shard_id] >= rows_per_run:
+                        flush_shard(shard_id)
             
             files_processed += 1
                 
@@ -1133,34 +1214,22 @@ def partition_worker(args: Tuple) -> Dict:
             import traceback
             traceback.print_exc()
         finally:
-            # ALWAYS increment progress counter
             if progress_counter is not None:
                 try:
                     progress_counter.value += 1
                 except:
-                    pass  # Ignore errors from progress counter
+                    pass
 
-    # Flush remaining buffers (only shards with data)
-    active_shards = [sid for sid, buf in shard_buffers.items() if buf]
-    
-    for shard_id in active_shards:
-        flush_shard_buffer(
-            shard_id, 
-            shard_buffers[shard_id], 
-            temp_dir, 
-            worker_id, 
-            run_sequence, 
-            meds_schema, 
-            compression
-        )
-
-    elapsed = time.time() - start_time
+    # Flush remaining data
+    for shard_id in range(num_shards):
+        if shard_buffers[shard_id]:
+            flush_shard(shard_id)
 
     return {
         "worker_id": worker_id,
         "files_processed": files_processed,
         "rows_processed": rows_processed,
-        "elapsed_sec": elapsed,
+        "elapsed_sec": time.time() - start_time,
     }
 
 
@@ -1251,102 +1320,133 @@ class ParquetRunIterator:
 def kway_merge_shard(
     run_files: List[Path],
     output_file: Path,
-    batch_size: int,
+    memory_budget_mb: int,
     meds_schema: Dict[str, type],
     compression: str,
 ) -> int:
-    """K-way merge with MEDS schema."""
+    """
+    Memory-bounded k-way merge of sorted run files.
+    
+    Args:
+        run_files: List of sorted parquet files to merge
+        output_file: Output path for merged file
+        memory_budget_mb: Memory budget in MB (e.g., 1024)
+        meds_schema: MEDS schema dictionary
+        compression: Compression algorithm
+    
+    Returns:
+        Total rows merged
+    """
     if not run_files:
         return 0
-
-    writer = None
-    schema_pa = None
     
-    # Parse compression (e.g., "zstd:3" -> algo="zstd", level=3)
+    import heapq
+    
+    num_files = len(run_files)
+    row_size_bytes = 1000  # Estimate: ~1KB per row
+    
+    # Split memory: 80% for input buffers, 20% for output buffer
+    input_budget_mb = memory_budget_mb * 0.8
+    output_budget_mb = memory_budget_mb * 0.2
+    
+    # Batch size per input file
+    batch_size_per_file = max(
+        100,  # Minimum for I/O efficiency
+        int((input_budget_mb * 1024 * 1024) / num_files / row_size_bytes)
+    )
+    
+    # Output batch size
+    output_batch_size = max(
+        1000,
+        int((output_budget_mb * 1024 * 1024) / row_size_bytes)
+    )
+    
+    # Parse compression
     compression_algo, compression_level = parse_compression(compression)
-
+    
+    # Initialize heap with first row from each file
     heap = []
+    iterators = {}
+    
     for i, file_path in enumerate(run_files):
         try:
-            it = ParquetRunIterator(file_path, batch_size=50000)
+            it = ParquetRunIterator(file_path, batch_size=batch_size_per_file)
             first_row = next(it)
-            # Sort by (subject_id, time) - both are comparable
             sort_key = (first_row["subject_id"], first_row["time"])
-            heapq.heappush(heap, (sort_key, i, first_row, it))
+            heapq.heappush(heap, (sort_key, i, first_row))
+            iterators[i] = it
         except StopIteration:
-            pass
-
-    batch = []
+            pass  # Empty file
+    
+    # Output state
+    output_batch = []
+    writer = None
+    schema_pa = None
     total_rows = 0
-
+    
+    # K-way merge loop
     while heap:
-        sort_key, file_idx, row, iterator = heapq.heappop(heap)
-
-        batch.append(row)
+        sort_key, file_idx, row = heapq.heappop(heap)
+        
+        output_batch.append(row)
         total_rows += 1
-
-        if len(batch) >= batch_size:
+        
+        # Flush output batch when full
+        if len(output_batch) >= output_batch_size:
             if writer is None:
-                # Create DataFrame WITH explicit schema_overrides
-                df = pl.DataFrame(batch, schema_overrides=meds_schema)
+                df = pl.DataFrame(output_batch, schema_overrides=meds_schema)
                 schema_pa = df.to_arrow().schema
-                # Keep statistics=True for final output (helps downstream queries)
                 if compression_level is not None:
                     writer = pq.ParquetWriter(
-                        output_file, schema_pa, 
-                        compression=compression_algo, 
+                        output_file, schema_pa,
+                        compression=compression_algo,
                         compression_level=compression_level,
                         write_statistics=True
                     )
                 else:
                     writer = pq.ParquetWriter(
-                        output_file, schema_pa, 
+                        output_file, schema_pa,
                         compression=compression_algo,
                         write_statistics=True
                     )
-
-            # Create DataFrame WITH explicit schema_overrides (fast - all dicts have same keys)
-            df = pl.DataFrame(batch, schema_overrides=meds_schema)
-
-            table = df.to_arrow()
-            writer.write_table(table)
-            batch = []
-
+            
+            df = pl.DataFrame(output_batch, schema_overrides=meds_schema)
+            writer.write_table(df.to_arrow())
+            output_batch = []
+        
+        # Get next row from same file
         try:
-            next_row = next(iterator)
+            next_row = next(iterators[file_idx])
             next_key = (next_row["subject_id"], next_row["time"])
-            heapq.heappush(heap, (next_key, file_idx, next_row, iterator))
+            heapq.heappush(heap, (next_key, file_idx, next_row))
         except StopIteration:
-            pass
-
-    if batch:
-        # Create DataFrame for final batch WITH explicit schema_overrides
-        df = pl.DataFrame(batch, schema_overrides=meds_schema)
-
+            pass  # File exhausted
+    
+    # Flush remaining output
+    if output_batch:
+        df = pl.DataFrame(output_batch, schema_overrides=meds_schema)
         if writer is None:
-            # Keep statistics for final output (no writer means this is the only batch)
             if compression_level is not None:
                 df.write_parquet(
-                    output_file, 
-                    compression=compression_algo, 
+                    output_file,
+                    compression=compression_algo,
                     compression_level=compression_level,
                     statistics=True
                 )
             else:
                 df.write_parquet(output_file, compression=compression_algo, statistics=True)
         else:
-            table = df.to_arrow()
-            writer.write_table(table)
-
+            writer.write_table(df.to_arrow())
+    
     if writer is not None:
         writer.close()
-
+    
     return total_rows
 
 
 def merge_worker(args: Tuple) -> Dict:
     """Worker for Stage 2 - merge runs for a shard."""
-    shard_id, temp_dir, output_dir, batch_size, meds_schema, compression = args
+    shard_id, temp_dir, output_dir, memory_budget_mb, meds_schema, compression = args
 
     start_time = time.time()
 
@@ -1358,11 +1458,11 @@ def merge_worker(args: Tuple) -> Dict:
     if not run_files:
         return {"shard_id": shard_id, "rows": 0, "elapsed_sec": 0}
 
-    output_shard_dir = output_dir / f"shard={shard_id}"
-    output_shard_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_shard_dir / "part-0000.parquet"
+    # MEDS format: data_{shard_id}.parquet (flat structure)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = output_dir / f"data_{shard_id}.parquet"
 
-    row_count = kway_merge_shard(run_files, output_file, batch_size, meds_schema, compression)
+    row_count = kway_merge_shard(run_files, output_file, memory_budget_mb, meds_schema, compression)
 
     elapsed = time.time() - start_time
 
@@ -1472,7 +1572,7 @@ def run_pipeline(
     num_shards: int,
     num_workers: int,
     rows_per_run: int,
-    batch_size: int,
+    merge_memory_mb: int,
     verbose: bool,
     polars_threads: Optional[int],
     memory_limit_mb: Optional[int],
@@ -1535,35 +1635,23 @@ def run_pipeline(
 
     os.environ["POLARS_MAX_THREADS"] = str(polars_threads)
 
-    # Memory auto-tuning
-    if memory_limit_mb:
-        # Calculate per-worker memory budget
-        per_worker_mb = memory_limit_mb / num_workers * 0.7  # 70% usable per worker
-        bytes_per_row = 1000  # Estimate: ~1KB per row with metadata
-        per_worker_rows_budget = int((per_worker_mb * 1024 * 1024) / bytes_per_row)
-
-        # rows_per_run controls TOTAL buffered rows per worker before flush
-        auto_rows_per_run = int(per_worker_rows_budget * 0.8)  # 80% of per-worker budget
-        auto_rows_per_run = max(10_000, min(auto_rows_per_run, 1_000_000))
-
-        if verbose:
-            log_info("MEMORY", f"Auto-tune calculation: {memory_limit_mb} MB limit / {num_workers} workers * 0.7 = {per_worker_mb:.0f} MB/worker")
-            log_info("MEMORY", f"Auto-tuned rows_per_run: {auto_rows_per_run:,} (capped at 1M)")
-        
-        if rows_per_run != auto_rows_per_run:
-            if verbose:
-                log_info("MEMORY", f"Overriding --rows_per_run: {rows_per_run:,} → {auto_rows_per_run:,}")
-            rows_per_run = auto_rows_per_run
+    # Memory calculation
+    bytes_per_row = 1000  # Estimate: ~1KB per row with metadata
+    est_worker_memory_mb = (rows_per_run * num_shards * bytes_per_row) / 1024 / 1024
+    est_total_memory_mb = est_worker_memory_mb * num_workers
     
     if verbose:
         log_section("[MEMORY]")
-        log_kv("MEMORY", "memory_limit", f"{memory_limit_mb} MB" if memory_limit_mb else "none")
-        log_kv("MEMORY", "rows_per_run", f"{rows_per_run:,} (buffered rows per worker before flush)")
-        log_kv("MEMORY", "est_mem/worker", f"~{(rows_per_run * 1000) / 1024 / 1024:.0f} MB")
-        log_kv("MEMORY", "est_mem_total", f"~{(rows_per_run * 1000 * num_workers) / 1024 / 1024:.0f} MB across {num_workers} workers")
+        log_kv("MEMORY", "num_shards", num_shards)
+        log_kv("MEMORY", "rows_per_run", f"{rows_per_run:,} (rows per shard buffer before flush)")
+        log_kv("MEMORY", "est_mem/worker", f"~{est_worker_memory_mb:.0f} MB ({rows_per_run:,} rows × {num_shards} shards)")
+        log_kv("MEMORY", "est_mem_total", f"~{est_total_memory_mb:.0f} MB ({num_workers} workers)")
         
-        if memory_limit_mb and (rows_per_run * 1000 * num_workers) / 1024 / 1024 > memory_limit_mb:
-            log_info("MEMORY", f"⚠️  WARNING: Estimated memory exceeds limit - consider reducing --workers")
+        if memory_limit_mb:
+            log_kv("MEMORY", "memory_limit", f"{memory_limit_mb} MB (--memory_limit_mb)")
+            if est_total_memory_mb > memory_limit_mb:
+                log_info("MEMORY", f"⚠️  WARNING: Estimated memory ({est_total_memory_mb:.0f} MB) exceeds limit ({memory_limit_mb} MB)")
+                log_info("MEMORY", f"   Consider: --rows_per_run {int(rows_per_run * 0.5):,} or --workers {max(1, num_workers // 2)}")
 
     pipeline_start = time.time()
 
@@ -1757,10 +1845,12 @@ def run_pipeline(
     log_section("[STAGE 2] Merging")
     if verbose:
         log_kv("STAGE 2", "shards", num_shards)
+        log_kv("STAGE 2", "workers", min(num_workers, num_shards))
+        log_kv("STAGE 2", "memory_budget", f"{merge_memory_mb} MB per worker")
     stage2_start = time.time()
 
     merge_args = [
-        (shard_id, temp_dir, final_dir, batch_size, meds_schema, compression) for shard_id in range(num_shards)
+        (shard_id, temp_dir, final_dir, merge_memory_mb, meds_schema, compression) for shard_id in range(num_shards)
     ]
 
     # Run merge workers with progress tracking
@@ -1830,10 +1920,10 @@ def main():
     parser.add_argument("--code_mapping", choices=["source_value", "concept_id"], required=True)
     parser.add_argument("--shards", type=int, default=100, help="Number of output shards")
     parser.add_argument("--workers", type=int, default=mp.cpu_count(), help="Number of worker processes")
-    parser.add_argument("--rows_per_run", type=int, default=50_000, help="Total rows to buffer before flushing (controls memory)")
-    parser.add_argument("--batch_size", type=int, default=100_000, help="Batch size for Stage 2 merge")
+    parser.add_argument("--rows_per_run", type=int, default=50_000, help="Rows per shard buffer before flushing (controls memory)")
+    parser.add_argument("--merge_memory_mb", type=int, default=1024, help="Memory budget per worker for Stage 2 merge (MB)")
     parser.add_argument("--polars_threads", type=int, default=None, help="Polars threads per worker")
-    parser.add_argument("--memory_limit_mb", type=int, default=None, help="Memory limit (auto-tunes rows_per_run)")
+    parser.add_argument("--memory_limit_mb", type=int, default=None, help="Memory limit for validation warnings (doesn't auto-tune)")
     parser.add_argument(
         "--compression", 
         default="zstd",
@@ -1874,7 +1964,7 @@ def main():
         num_shards=args.shards,
         num_workers=args.workers,
         rows_per_run=args.rows_per_run,
-        batch_size=args.batch_size,
+        merge_memory_mb=args.merge_memory_mb,
         verbose=args.verbose,
         polars_threads=args.polars_threads,
         memory_limit_mb=args.memory_limit_mb,
