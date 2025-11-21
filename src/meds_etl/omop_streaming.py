@@ -1,43 +1,38 @@
-
 """
-Refactored OMOP to MEDS ETL pipeline.
+OMOP to MEDS ETL with Polars Streaming External Sort
 
-Combines best practices from omop.py and omop_scalable.py:
-- Config validation from omop_scalable.py
-- Fast DataFrame joins without sorting from omop_scalable.py
-- MEDS Unsorted output format from omop.py
-- Support for both meds_etl_cpp and pure Python backends
+This version uses Polars 1.x streaming engine for Stage 2 (external sort):
+- Stage 1: OMOP → MEDS Unsorted (same as omop_refactor.py)
+- Stage 2: Streaming external sort using Polars lazy evaluation + sink_parquet
 
-Architecture:
-  Stage 1: OMOP → MEDS Unsorted (fast, parallel, no sorting)
-  Stage 2: MEDS Unsorted → MEDS (via meds_etl_cpp or unsorted.sort())
+Key advantage: Polars' native k-way merge is faster than manual implementations,
+and uses bounded memory through streaming.
+
+Based on external_sort.py approach.
 """
 
-from __future__ import annotations
-
-import argparse
-import json
-import multiprocessing as mp
-import os
-import pickle
-import shutil
-import sys
-import time
-import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
-
+import shutil
+from typing import Dict, List, Optional, Set, Tuple, Any
 import polars as pl
-import pyarrow as pa
-import pyarrow.parquet as pq
-from tqdm import tqdm
+import os
+import gc
 
-import meds
-import meds_etl
-import meds_etl.unsorted
+# Import Stage 1 from omop_refactor.py
+import sys
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+import json
+import time
+from tqdm import tqdm
+import re
+import pickle
+import uuid
+
 
 # ============================================================================
-# SCHEMA UTILITIES
+# SCHEMA UTILITIES (from omop_refactor.py)
 # ============================================================================
 
 
@@ -151,7 +146,7 @@ def get_meds_schema_from_config(config: Dict) -> Dict[str, type]:
 
 
 # ============================================================================
-# CONFIGURATION VALIDATION
+# CONFIGURATION VALIDATION (from omop_refactor.py)
 # ============================================================================
 
 
@@ -282,8 +277,6 @@ def validate_config_against_data(omop_dir: Path, config: Dict, code_mapping_choi
                     if isinstance(mapping_config, dict) and "template" in mapping_config:
                         template = mapping_config["template"]
                         # Extract field references like {field_name}
-                        import re
-
                         field_refs = re.findall(r"\{(\w+)\}", template)
                         for field in field_refs:
                             if field not in df_schema.names():
@@ -310,7 +303,7 @@ def validate_config_against_data(omop_dir: Path, config: Dict, code_mapping_choi
 
 
 # ============================================================================
-# CONCEPT MAP BUILDING
+# CONCEPT MAP BUILDING (from omop_refactor.py)
 # ============================================================================
 
 
@@ -452,6 +445,7 @@ def validate_parquet_file(file_path: Path) -> bool:
     """
     try:
         # Try to read just the schema (fast)
+        import pyarrow.parquet as pq
         pq.read_schema(file_path)
         return True
     except Exception:
@@ -648,7 +642,7 @@ def prescan_concept_ids(
 
 
 # ============================================================================
-# FILE DISCOVERY
+# FILE DISCOVERY (from omop_refactor.py)
 # ============================================================================
 
 
@@ -665,7 +659,7 @@ def find_omop_table_files(omop_dir: Path, table_name: str) -> List[Path]:
 
 
 # ============================================================================
-# FAST TRANSFORM (NO SORTING)
+# TRANSFORMATION UTILITIES (from omop_refactor.py)
 # ============================================================================
 
 
@@ -818,7 +812,6 @@ def transform_to_meds_unsorted(
         if "template" in source_value_config:
             # Template-based code generation
             template = source_value_config["template"]
-            import re
 
             parts = re.split(r"(\{[^}]+\})", template)
 
@@ -855,7 +848,6 @@ def transform_to_meds_unsorted(
             # Template-based code generation (NO concept table lookup!)
             # Even though this is in concept_id section, template generates literal codes
             template = concept_config["template"]
-            import re
 
             parts = re.split(r"(\{[^}]+\})", template)
 
@@ -987,17 +979,12 @@ def transform_to_meds_unsorted(
     return result
 
 
-# ============================================================================
-# WORKER FUNCTIONS
-# ============================================================================
-
-
 def process_omop_file_worker(args: Tuple) -> Dict:
     """
     Worker function to process a single OMOP file.
 
     Reads OMOP Parquet → transforms to MEDS Unsorted → writes output.
-    NO sorting, NO sharding (done later by meds_etl_cpp or unsorted.sort).
+    NO sorting, NO sharding (done later by streaming sort).
     """
     (
         file_path,
@@ -1103,293 +1090,540 @@ def process_omop_file_worker(args: Tuple) -> Dict:
 
 
 # ============================================================================
-# SEQUENTIAL LOW-MEMORY SORT
+# STREAMING EXTERNAL SORT (Polars 1.x)
 # ============================================================================
 
 
-def process_single_shard(args: Tuple) -> Dict:
+def _partition_file_worker(args):
     """
-    Worker function to process a single shard.
-
-    Reads all unsorted files, filters for this shard, sorts, and writes.
+    Worker function to partition a single unsorted file into sorted runs.
+    
+    Returns a list of run counts per shard.
     """
-    shard_id, unsorted_files, output_dir, num_shards = args
-
+    file_idx, unsorted_file, runs_dir, num_shards, chunk_rows, compression, verbose, low_memory = args
+    
+    run_counts = [0] * num_shards
+    
     try:
-        shard_data = []
+        # Read file (only once!) with low_memory flag
+        df = pl.read_parquet(unsorted_file, low_memory=low_memory)
 
-        # Read and filter data for this shard from all unsorted files
-        for unsorted_file in unsorted_files:
-            try:
-                # Lazy scan and filter
-                df = pl.scan_parquet(unsorted_file).filter((pl.col("subject_id") % num_shards) == shard_id).collect()
+        if len(df) == 0:
+            return run_counts
 
-                if len(df) > 0:
-                    shard_data.append(df)
+        # Add shard_id column
+        df = df.with_columns([(pl.col("subject_id") % num_shards).alias("_shard_id")])
 
-            except Exception:
+        # Partition to each shard
+        for shard_id in range(num_shards):
+            # Filter for this shard
+            shard_data = df.filter(pl.col("_shard_id") == shard_id).drop("_shard_id")
+
+            if len(shard_data) == 0:
                 continue
 
-        # If no data for this shard, skip
-        if not shard_data:
-            return {"shard_id": shard_id, "rows": 0, "success": True}
+            # Process in chunks if data is large
+            num_rows = len(shard_data)
+            num_chunks = (num_rows + chunk_rows - 1) // chunk_rows
 
-        # Concatenate and sort
-        shard_df = pl.concat(shard_data, rechunk=True)
-        row_count = len(shard_df)
+            for chunk_idx in range(num_chunks):
+                start_idx = chunk_idx * chunk_rows
+                end_idx = min((chunk_idx + 1) * chunk_rows, num_rows)
 
-        # Sort by subject_id, then time
-        shard_df = shard_df.sort(["subject_id", "time"])
+                chunk = shard_data[start_idx:end_idx]
 
-        # Write shard
-        output_file = output_dir / f"{shard_id}.parquet"
-        shard_df.write_parquet(output_file, compression="zstd")
+                # Sort chunk
+                sorted_chunk = chunk.sort(["subject_id", "time"])
 
-        # Free memory
-        del shard_df
-        del shard_data
+                # Write as run
+                shard_dir = runs_dir / f"shard_{shard_id}"
+                run_file = shard_dir / f"run_{file_idx:05d}_{chunk_idx:05d}.parquet"
+                sorted_chunk.write_parquet(run_file, compression=compression)
 
-        return {"shard_id": shard_id, "rows": row_count, "success": True}
+                run_counts[shard_id] += 1
+            
+            # Cleanup shard data
+            del shard_data
+        
+        # Cleanup file data and force garbage collection
+        del df
+        gc.collect()
 
     except Exception as e:
-        return {"shard_id": shard_id, "rows": 0, "success": False, "error": str(e)}
+        if verbose:
+            print(f"\n  WARNING: Error processing {unsorted_file.name}: {e}")
+    
+    return run_counts
 
 
-def parallel_shard_sort(
+def partition_to_sorted_runs(
     unsorted_dir: Path,
-    output_dir: Path,
+    runs_dir: Path,
     num_shards: int,
-    num_workers: int,
+    chunk_rows: int = 10_000_000,
+    compression: str = "lz4",
     verbose: bool = False,
+    low_memory: bool = True,
+    num_workers: int = 1,
 ) -> None:
     """
-    Parallel shard-based external sort.
+    Stage 2.1: Partition unsorted data into sorted runs (OPTIMIZED + PARALLEL).
 
-    Uses multiple workers where each worker processes one complete shard at a time:
-    1. Worker takes next shard from queue
-    2. Loads all data for that shard (filtering from unsorted files)
-    3. Sorts in memory
-    4. Writes to output
-    5. Moves to next shard
+    Reads each unsorted file ONCE and partitions to all shards:
+    - Read unsorted file
+    - Add shard_id column (subject_id % num_shards)
+    - For each shard: filter, sort, write run
 
-    Memory usage: ~num_workers * shard_size
-    Speed: Much faster than sequential, slower than meds_etl_cpp
-
-    Writes to output_dir/result/data/ to match other backends.
+    This is much faster than reading each file N times (once per shard).
+    
+    Args:
+        low_memory: Use Polars low_memory mode for smaller batches
+        num_workers: Number of parallel workers for processing files
     """
-    print(f"\n✅ Using parallel shard-based sort...")
-    print(f"   Workers: {num_workers}")
-    print(f"   Shards: {num_shards}")
-    print(f"   Memory usage: ~{num_workers} shards in RAM at once")
+    print(f"\n[Stage 2.1] Creating sorted runs (optimized + parallel)...")
+    print(f"  Shards: {num_shards}")
+    print(f"  Workers: {num_workers}")
+    print(f"  Chunk size: {chunk_rows:,} rows")
+    print(f"  Strategy: Read-once partitioning")
 
-    # Create output directory (match other backends: output_dir/result/data/)
-    result_dir = output_dir / "result"
-    final_data_dir = result_dir / "data"
-    final_data_dir.mkdir(parents=True, exist_ok=True)
+    runs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create shard directories
+    for shard_id in range(num_shards):
+        shard_dir = runs_dir / f"shard_{shard_id}"
+        shard_dir.mkdir(exist_ok=True)
 
     # Find all unsorted files
-    unsorted_files = list(unsorted_dir.glob("*.parquet"))
+    unsorted_files = sorted(unsorted_dir.glob("*.parquet"))
 
     if not unsorted_files:
-        print(f"   ⚠️  No unsorted files found in {unsorted_dir}")
+        print(f"  WARNING: No unsorted files found")
         return
 
-    print(f"\n   Found {len(unsorted_files)} unsorted files")
+    print(f"  Unsorted files: {len(unsorted_files)}")
 
-    # Create tasks for all shards
-    tasks = [(shard_id, unsorted_files, final_data_dir, num_shards) for shard_id in range(num_shards)]
+    # Prepare worker arguments
+    worker_args = [
+        (file_idx, unsorted_file, runs_dir, num_shards, chunk_rows, compression, verbose, low_memory)
+        for file_idx, unsorted_file in enumerate(unsorted_files)
+    ]
 
-    # Process shards in parallel
-    if num_workers > 1:
-        with mp.Pool(processes=num_workers) as pool:
-            results = list(
-                tqdm(pool.imap_unordered(process_single_shard, tasks), total=num_shards, desc="Processing shards")
-            )
+    # Process files in parallel or sequentially
+    if num_workers == 1:
+        # Sequential processing
+        all_run_counts = []
+        for args in tqdm(worker_args, desc="Partitioning files"):
+            run_counts = _partition_file_worker(args)
+            all_run_counts.append(run_counts)
     else:
-        results = []
-        for task in tqdm(tasks, desc="Processing shards"):
-            results.append(process_single_shard(task))
+        # Parallel processing
+        import multiprocessing as mp
+        with mp.Pool(processes=num_workers) as pool:
+            all_run_counts = list(
+                tqdm(
+                    pool.imap_unordered(_partition_file_worker, worker_args),
+                    total=len(worker_args),
+                    desc="Partitioning files",
+                )
+            )
 
-    # Report results
-    successes = [r for r in results if r["success"]]
-    failures = [r for r in results if not r["success"]]
-    total_rows = sum(r["rows"] for r in successes)
+    # Aggregate run counts across all files
+    total_run_counts = [0] * num_shards
+    for run_counts in all_run_counts:
+        for shard_id in range(num_shards):
+            total_run_counts[shard_id] += run_counts[shard_id]
 
-    print(f"\n   ✅ Parallel shard sort complete")
-    print(f"   Shards processed: {len(successes)}/{num_shards}")
-    print(f"   Total rows: {total_rows:,}")
+    # Always show run statistics (useful for debugging)
+    print(f"\n  ✓ Partitioning complete")
+    print(f"  Total runs created: {sum(total_run_counts)}")
+    print(f"  Runs per shard (avg): {sum(total_run_counts) / num_shards:.1f}")
 
-    if failures and verbose:
-        print(f"   ⚠️  {len(failures)} shards failed:")
-        for f in failures[:5]:
-            print(f"      Shard {f['shard_id']}: {f.get('error', 'Unknown error')}")
+    if verbose:
+        print(f"\n  Detailed runs per shard:")
+        for shard_id, count in enumerate(total_run_counts):
+            print(f"    Shard {shard_id:3d}: {count:4d} runs")
 
 
-def sequential_shard_sort(
+def streaming_merge_shard(
+    shard_dir: Path,
+    output_file: Path,
+    compression: str = "zstd",
+    verbose: bool = False,
+    low_memory: bool = True,
+    row_group_size: int = 100_000,
+) -> int:
+    """
+    Stage 2.2: Streaming merge of sorted runs using Polars.
+
+    Uses Polars' lazy evaluation + streaming engine:
+    - Lazy scan all run files
+    - Concat them
+    - Sort (triggers streaming k-way merge)
+    - Sink to output (streaming write)
+
+    This is memory-bounded and efficient (native Rust implementation).
+    
+    Args:
+        low_memory: Use Polars low_memory mode for smaller batches
+        row_group_size: Rows per row group in output Parquet (smaller = less memory)
+    """
+    run_files = sorted(shard_dir.glob("run_*.parquet"))
+
+    if not run_files:
+        return 0
+
+    # Lazy scan all runs with low_memory flag
+    scans = [pl.scan_parquet(str(f), low_memory=low_memory) for f in run_files]
+
+    # Concat + sort + streaming sink
+    # Polars automatically uses streaming k-way merge here!
+    (
+        pl.concat(scans, how="vertical")
+        .sort(["subject_id", "time"])
+        .sink_parquet(
+            str(output_file), 
+            compression=compression, 
+            maintain_order=True,  # Important for sorted output
+            row_group_size=row_group_size,  # Control memory usage
+        )
+    )
+
+    # Get row count
+    row_count = pl.scan_parquet(output_file).select(pl.len()).collect().item()
+    
+    # Force garbage collection
+    gc.collect()
+
+    return row_count
+
+
+def _merge_shard_worker(args):
+    """
+    Worker function for parallel shard merging.
+    Must be at module level to be picklable by multiprocessing.
+    """
+    shard_dir, output_file, compression, low_memory, row_group_size = args
+    
+    rows = streaming_merge_shard(
+        shard_dir, 
+        output_file, 
+        compression=compression, 
+        verbose=False,
+        low_memory=low_memory,
+        row_group_size=row_group_size,
+    )
+    
+    # Explicit cleanup
+    gc.collect()
+    
+    return rows
+
+
+def streaming_external_sort(
     unsorted_dir: Path,
     output_dir: Path,
     num_shards: int,
+    chunk_rows: int = 10_000_000,
+    run_compression: str = "lz4",
+    final_compression: str = "zstd",
+    merge_workers: int = 0,
     verbose: bool = False,
+    run_partition: bool = True,
+    run_merge: bool = True,
+    low_memory: bool = True,
+    row_group_size: int = 100_000,
+    num_workers: int = 1,
 ) -> None:
     """
-    Sequential low-memory external sort.
+    Complete streaming external sort using Polars 1.x.
 
-    Processes one shard at a time to minimize memory usage:
-    1. Read all unsorted files
-    2. For each shard ID (0 to num_shards-1):
-       - Filter records for this shard (subject_id % num_shards == shard_id)
-       - Sort by (subject_id, time)
-       - Write to output
+    Two stages:
+    1. Partition unsorted data into sorted runs (chunked processing)
+    2. Streaming k-way merge of runs (Polars native)
 
-    This is slower than parallel processing but uses minimal memory
-    (only one shard in memory at a time).
+    Memory-bounded, fast, and simple.
 
-    Writes to output_dir/result/data/ to match other backends.
+    Args:
+        merge_workers: Number of parallel merge workers (0=auto, 1=sequential, N=parallel)
+        low_memory: Use Polars low_memory mode (smaller batches, less RAM)
+        row_group_size: Rows per Parquet row group (smaller = less memory)
+        num_workers: Number of parallel workers for Stage 2.1 partitioning
     """
-    print(f"\n✅ Using sequential low-memory sort...")
-    print(f"   Processing {num_shards} shards one at a time")
-    print(f"   Memory usage: ~1 shard in RAM at a time")
+    print(f"\n" + "=" * 70)
+    print("STAGE 2: STREAMING EXTERNAL SORT")
+    print("=" * 70)
 
-    # Create output directory (match other backends: output_dir/result/data/)
-    result_dir = output_dir / "result"
-    final_data_dir = result_dir / "data"
-    final_data_dir.mkdir(parents=True, exist_ok=True)
+    stage2_start = time.time()
 
-    # Find all unsorted files
-    unsorted_files = list(unsorted_dir.glob("*.parquet"))
+    # Create temporary runs directory
+    runs_dir = output_dir / "runs_temp"
+    final_dir = output_dir / "data"
+    final_dir.mkdir(parents=True, exist_ok=True)
 
-    if not unsorted_files:
-        print(f"   ⚠️  No unsorted files found in {unsorted_dir}")
-        return
+    # Stage 2.1: Create sorted runs
+    if run_partition:
+        partition_to_sorted_runs(
+            unsorted_dir=unsorted_dir,
+            runs_dir=runs_dir,
+            num_shards=num_shards,
+            chunk_rows=chunk_rows,
+            compression=run_compression,
+            verbose=verbose,
+            low_memory=low_memory,
+            num_workers=num_workers,
+        )
+    else:
+        print("\nSkipping Stage 2.1 (partition)")
+        # Check if runs exist
+        if not runs_dir.exists():
+            print(f"ERROR: No runs found at {runs_dir}")
+            print(f"  Run with --pipeline partition first!")
+            sys.exit(1)
 
-    print(f"\n   Found {len(unsorted_files)} unsorted files")
+    # Stage 2.2: Streaming merge per shard
+    total_rows = 0
 
-    # Process each shard sequentially
-    for shard_id in tqdm(range(num_shards), desc="Processing shards"):
-        shard_data = []
+    if run_merge:
+        # Prepare merge tasks (include all memory config in args)
+        merge_tasks = []
+        for shard_id in range(num_shards):
+            shard_dir = runs_dir / f"shard_{shard_id}"
+            if shard_dir.exists():
+                output_file = final_dir / f"{shard_id}.parquet"
+                merge_tasks.append((shard_dir, output_file, final_compression, low_memory, row_group_size))
 
-        # Read and filter data for this shard from all unsorted files
-        for unsorted_file in unsorted_files:
-            try:
-                # Lazy scan and filter
-                df = pl.scan_parquet(unsorted_file).filter((pl.col("subject_id") % num_shards) == shard_id).collect()
+        # Determine number of workers
+        import multiprocessing as mp
 
-                if len(df) > 0:
-                    shard_data.append(df)
+        if merge_workers == 0:
+            # Auto: use half the available cores (leave room for I/O)
+            num_merge_workers = max(1, mp.cpu_count() // 2)
+        else:
+            num_merge_workers = merge_workers
 
-            except Exception as e:
-                if verbose:
-                    print(f"\n   ⚠️  Error reading {unsorted_file}: {e}")
-                continue
+        # Sequential vs Parallel
+        if num_merge_workers == 1:
+            # Sequential merge (low memory)
+            print(f"\n[Stage 2.2] Streaming merge (sequential)...")
+            row_counts = []
+            for task in tqdm(merge_tasks, desc="Merging shards"):
+                rows = _merge_shard_worker(task)
+                row_counts.append(rows)
+        else:
+            # Parallel merge (faster but more memory)
+            print(f"\n[Stage 2.2] Streaming merge (parallel, {num_merge_workers} workers)...")
+            with mp.Pool(processes=num_merge_workers) as pool:
+                row_counts = list(
+                    tqdm(
+                        pool.imap_unordered(_merge_shard_worker, merge_tasks),
+                        total=len(merge_tasks),
+                        desc="Merging shards",
+                    )
+                )
 
-        # If no data for this shard, skip
-        if not shard_data:
-            continue
+        total_rows = sum(row_counts)
 
-        # Concatenate and sort
-        shard_df = pl.concat(shard_data, rechunk=True)
+        # Cleanup runs
+        if run_partition:  # Only cleanup if we created the runs in this session
+            shutil.rmtree(runs_dir)
+    else:
+        print("\nSkipping Stage 2.2 (merge)")
 
-        # Sort by subject_id, then time
-        shard_df = shard_df.sort(["subject_id", "time"])
+    stage2_elapsed = time.time() - stage2_start
 
-        # Write shard
-        output_file = final_data_dir / f"{shard_id}.parquet"
-        shard_df.write_parquet(output_file, compression="zstd")
+    print(f"\n" + "=" * 70)
+    print("STAGE 2 COMPLETE: STREAMING SORT")
+    print("=" * 70)
+    print(f"Total rows:    {total_rows:,}")
+    print(f"Shards:        {num_shards}")
+    print(f"Chunk size:    {chunk_rows:,} rows")
+    print(f"Time:          {stage2_elapsed:.2f}s")
+    if stage2_elapsed > 0:
+        print(f"Throughput:    {total_rows / stage2_elapsed / 1_000_000:.2f}M rows/sec")
 
-        # Free memory
-        del shard_df
-        del shard_data
+    # Per-shard breakdown
+    if verbose:
+        print(f"\nPer-shard breakdown:")
+        for shard_id in range(num_shards):
+            output_file = final_dir / f"{shard_id}.parquet"
+            if output_file.exists():
+                size_mb = output_file.stat().st_size / 1024 / 1024
+                rows = pl.scan_parquet(output_file).select(pl.len()).collect().item()
+                print(f"  Shard {shard_id:3d}: {rows:12,} rows  ({size_mb:8.1f} MB)")
 
-    print(f"\n   ✅ Sequential sort complete")
-    print(f"   Output: {final_data_dir}")
+    print("=" * 70)
 
 
 # ============================================================================
-# MAIN ETL PIPELINE
+# MAIN ETL WITH STREAMING SORT
 # ============================================================================
 
 
-def run_omop_to_meds_etl(
+def run_omop_to_meds_streaming(
     omop_dir: Path,
     output_dir: Path,
     config_path: Path,
     num_workers: int = 8,
     num_shards: Optional[int] = None,
-    backend: str = "polars",
     code_mapping_mode: str = "auto",
     verbose: bool = False,
     optimize_concepts: bool = True,
+    chunk_rows: int = 10_000_000,
+    run_compression: str = "lz4",
+    final_compression: str = "zstd",
+    merge_workers: int = 0,
+    pipeline_stages: str = "all",
+    # Memory configuration
     low_memory: bool = False,
-    parallel_shards: bool = False,
+    row_group_size: int = 100_000,
+    polars_threads: Optional[int] = None,
+    rayon_threads: Optional[int] = None,
+    process_method: str = "spawn",
 ):
     """
-    Run OMOP to MEDS ETL pipeline.
+    Run OMOP to MEDS ETL with streaming external sort.
 
-    Architecture (same as omop.py):
-
-    Stage 1: OMOP → MEDS Unsorted (Python/Polars)
-        - Fast DataFrame joins to create MEDS schema
-        - Global schema enforcement (consistent types)
-        - Writes unsorted Parquet files to temp/unsorted_data/
-        - 1:1 with input files (no sorting, no sharding)
-        - Compressed with lz4 (fast writes)
-
-    Stage 2: External Sort (meds_etl_cpp or Python fallback)
-        - Partitions by subject_id hash into shards
-        - Sorts each shard by (subject_id, time, code)
-        - Memory-bounded (meds_etl_cpp uses optimized C++ k-way merge)
-        - Multi-threaded (1 thread per shard)
-        - Writes final data/{shard_id}.parquet files
+    Same as omop_refactor.py but uses Polars streaming for Stage 2.
 
     Args:
-        num_shards: Number of output shards (default: from config or 100)
-        code_mapping_mode: Code mapping strategy: 'auto', 'concept_id', 'source_value', or 'template'
-        optimize_concepts: If True, pre-scan data to optimize concept map (99% memory reduction)
-        backend: Backend for Stage 2 sort: 'auto' (try cpp, fallback polars), 'cpp', 'polars'
-        low_memory: If True, use sequential shard processing (slowest, minimal memory)
-        parallel_shards: If True, use parallel shard processing (each worker processes one shard)
-
-    Sort options (Stage 2):
-    - Default (backend='auto'): meds_etl_cpp if available, else unsorted.sort()
-    - --parallel-shards: N workers, each processes one shard at a time (moderate memory)
-    - --low-memory: 1 worker, sequential processing (minimal memory)
+        chunk_rows: Rows per sorted run (default 10M - adjust based on RAM)
+        run_compression: Compression for intermediate runs (lz4, zstd, snappy)
+        final_compression: Compression for final output (zstd, snappy, lz4)
+        pipeline_stages: Which stages to run:
+            - "all": Run full pipeline (default)
+            - "transform": Only OMOP→MEDS transform (Stage 1)
+            - "partition": Only partition to sorted runs (Stage 2.1)
+            - "merge": Only merge runs (Stage 2.2)
+            - "sort": Run both partition + merge (Stage 2)
+        
+        Memory Configuration:
+            low_memory: Use Polars low_memory mode (smaller batches, less RAM). 
+                       Default False. Enable with --low_memory for 32-64GB laptops.
+            row_group_size: Rows per Parquet row group. Smaller = less memory.
+                           Default 100k (good for 32-64GB laptops).
+            polars_threads: Max threads for Polars (None = use env var, 1 = single-threaded).
+                           Overrides POLARS_MAX_THREADS env var.
+            rayon_threads: Max threads for Rayon (None = use env var, 1 = single-threaded).
+                          Overrides RAYON_NUM_THREADS env var.
+            process_method: Multiprocessing start method ('spawn' or 'fork'). 
+                           Default 'spawn' for better memory isolation.
+                           'fork' is faster but can cause memory bloat.
+                           CRITICAL: Must be set early to prevent deadlocks on Linux.
     """
-    print("\n" + "=" * 70)
-    print("OMOP → MEDS ETL PIPELINE (REFACTORED)")
-    print("=" * 70)
+    # ========================================================================
+    # CONFIGURE MULTIPROCESSING AND THREADING (MUST BE FIRST!)
+    # ========================================================================
+    # CRITICAL: This MUST happen before ANY multiprocessing operations,
+    # including prescan_concept_ids() which creates its own pool.
+    # On Linux, default 'fork' + Polars threads = deadlock.
+    # On Mac, default is already 'spawn' so this prevents Linux hangs.
+    
+    import multiprocessing as mp
+    
+    # Set multiprocessing start method FIRST
+    try:
+        mp.set_start_method(process_method, force=True)
+        if verbose:
+            print(f"Multiprocessing method: '{process_method}' (critical for Linux stability)")
+    except RuntimeError:
+        # Already set - check if it matches
+        current_method = mp.get_start_method()
+        if current_method != process_method and verbose:
+            print(f"Warning: multiprocessing method already set to '{current_method}' (requested '{process_method}')")
+        elif verbose:
+            print(f"Multiprocessing method: '{current_method}' (already set)")
+    
+    # Configure Polars threading (CLI args override environment variables)
+    if polars_threads is not None:
+        os.environ["POLARS_MAX_THREADS"] = str(polars_threads)
+        if verbose:
+            print(f"Set POLARS_MAX_THREADS={polars_threads} (overriding env var)")
+    elif "POLARS_MAX_THREADS" not in os.environ:
+        # Default: single-threaded per worker for multiprocessing
+        os.environ["POLARS_MAX_THREADS"] = "1"
+        if verbose:
+            print(f"Set POLARS_MAX_THREADS=1 (default for multiprocessing)")
+    
+    # Configure Rayon threading (used by Polars internally)
+    if rayon_threads is not None:
+        os.environ["RAYON_NUM_THREADS"] = str(rayon_threads)
+        if verbose:
+            print(f"Set RAYON_NUM_THREADS={rayon_threads} (overriding env var)")
+    elif "RAYON_NUM_THREADS" not in os.environ:
+        # Default: single-threaded per worker
+        os.environ["RAYON_NUM_THREADS"] = "1"
+        if verbose:
+            print(f"Set RAYON_NUM_THREADS=1 (default for multiprocessing)")
+    
+    # ========================================================================
+    # PARSE PIPELINE STAGES
+    # ========================================================================
+    
+    # Parse pipeline stages
+    stages_to_run = set()
+    if pipeline_stages == "all":
+        stages_to_run = {"transform", "partition", "merge"}
+    elif pipeline_stages == "transform":
+        stages_to_run = {"transform"}
+    elif pipeline_stages == "partition":
+        stages_to_run = {"partition"}
+    elif pipeline_stages == "merge":
+        stages_to_run = {"merge"}
+    elif pipeline_stages == "sort":
+        stages_to_run = {"partition", "merge"}
+    else:
+        raise ValueError(f"Invalid pipeline_stages: {pipeline_stages}. Must be: all, transform, partition, merge, sort")
 
     # Load config
     with open(config_path, "r") as f:
         config = json.load(f)
 
-    primary_key = config.get("primary_key", "person_id")
+    # Determine num_shards
+    if num_shards is None:
+        num_shards = config.get("num_shards", 100)
 
     # Setup directories
     output_dir = Path(output_dir)
     temp_dir = output_dir / "temp"
     unsorted_dir = temp_dir / "unsorted_data"
-    metadata_dir = temp_dir / "metadata"
-    final_dir = output_dir / "data"
+
+    # Run Stage 1 using original implementation
+    # This creates unsorted MEDS files
+    print("\n" + "=" * 70)
+    print("STREAMING ETL MODE")
+    print("=" * 70)
+    print(f"Pipeline stages: {', '.join(sorted(stages_to_run))}")
+    print(f"Run compression: {run_compression}")
+    print(f"Final compression: {final_compression}")
+    print(f"Using Polars 1.x streaming for Stage 2")
+
+    import meds
+    import meds_etl
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import multiprocessing as mp
+
+    primary_key = config.get("primary_key", "person_id")
 
     # Clean and create directories
     if temp_dir.exists():
         shutil.rmtree(temp_dir)
     temp_dir.mkdir(parents=True)
     unsorted_dir.mkdir()
+    metadata_dir = temp_dir / "metadata"
     metadata_dir.mkdir()
 
-    # Determine actual code mapping choice
+    # Determine code mapping
     if code_mapping_mode == "auto":
-        # Try concept_id first, fall back to source_value
-        code_mapping_choice = "concept_id"  # Will validate later if it exists
+        code_mapping_choice = "concept_id"
     else:
         code_mapping_choice = code_mapping_mode
 
-    # Validate config (including that chosen code mapping exists for all tables)
+    # Validate config
     validate_config_against_data(omop_dir, config, code_mapping_choice, verbose=verbose)
 
-    # Build concept map (as DataFrame for fast joins!) - only if needed
-    concept_df = pl.DataFrame(schema={"concept_id": pl.Int64, "code": pl.Utf8})  # Empty default
+    # Build concept map if needed
+    concept_df = pl.DataFrame(schema={"concept_id": pl.Int64, "code": pl.Utf8})
     code_metadata = {}
 
     if code_mapping_choice == "concept_id":
@@ -1400,37 +1634,26 @@ def run_omop_to_meds_etl(
         concept_df, code_metadata = build_concept_map(omop_dir, verbose=verbose)
 
         if len(concept_df) == 0:
-            print(f"\n❌ ERROR: concept_id mapping requested but concept table not found!")
-            print(f"   Use --code_mapping source_value or template instead.")
+            print(f"\nERROR: concept_id mapping requested but concept table not found!")
             sys.exit(1)
-        else:
-            print(f"  ✅ Loaded {len(concept_df):,} concepts")
 
-            # Optimize concept map by pre-scanning (99% memory reduction!)
-            if optimize_concepts:
+        print(f"  Loaded {len(concept_df):,} concepts")
+
+        # Optimize if requested
+        if optimize_concepts:
+            original_size = len(concept_df)
+            
+            if verbose:
+                print(f"\nOptimizing concept map (pre-scanning data to find used concepts)...")
+                print(f"  Using {num_workers} workers to scan OMOP files")
+                print(f"  (If this hangs on Linux, ensure --process_method spawn is set)")
+            
+            used_concept_ids = prescan_concept_ids(omop_dir, config, num_workers, verbose=verbose)
+
+            if used_concept_ids:
+                concept_df = concept_df.filter(pl.col("concept_id").is_in(list(used_concept_ids)))
                 if verbose:
-                    print(f"\n📊 Optimizing concept map (pre-scanning data to find used concepts)...")
-
-                original_size = len(concept_df)
-
-                # Pre-scan to find which concept_ids are actually used
-                used_concept_ids = prescan_concept_ids(omop_dir, config, num_workers, verbose=verbose)
-
-                if used_concept_ids:
-                    # Filter concept DataFrame to only used concepts
-                    concept_df = concept_df.filter(pl.col("concept_id").is_in(list(used_concept_ids)))
-                    filtered_size = len(concept_df)
-
-                    if verbose:
-                        reduction_pct = 100 * (1 - filtered_size / original_size) if original_size > 0 else 0
-                        memory_before_mb = original_size * 100 / 1024 / 1024  # Rough estimate
-                        memory_after_mb = filtered_size * 100 / 1024 / 1024
-                        print(
-                            f"  ✅ Optimized: {original_size:,} → {filtered_size:,} concepts ({reduction_pct:.1f}% reduction)"
-                        )
-                        print(f"  💾 Memory: ~{memory_before_mb:.1f} MB → ~{memory_after_mb:.1f} MB")
-    else:
-        print(f"\n📋 Code mapping mode: {code_mapping_choice} (skipping concept map)")
+                    print(f"  Optimized: {original_size:,} -> {len(concept_df):,} concepts")
 
     concept_df_data = pickle.dumps(concept_df)
 
@@ -1438,7 +1661,7 @@ def run_omop_to_meds_etl(
     dataset_metadata = {
         "dataset_name": "OMOP",
         "dataset_version": time.strftime("%Y-%m-%d"),
-        "etl_name": "meds_etl.omop_refactor",
+        "etl_name": "meds_etl.omop_refactor_streaming",
         "etl_version": meds_etl.__version__,
         "meds_version": meds.__version__,
     }
@@ -1450,285 +1673,220 @@ def run_omop_to_meds_etl(
         table = pa.Table.from_pylist(list(code_metadata.values()), meds.code_metadata_schema())
         pq.write_table(table, metadata_dir / "codes.parquet")
 
-    # Copy metadata to final location
+    # Copy metadata
     final_metadata_dir = output_dir / "metadata"
     if final_metadata_dir.exists():
         shutil.rmtree(final_metadata_dir)
     shutil.copytree(metadata_dir, final_metadata_dir)
 
     # ========================================================================
-    # STAGE 1: OMOP → MEDS Unsorted
+    # STAGE 1: OMOP → MEDS Unsorted (reuse from omop_refactor.py)
     # ========================================================================
 
-    print("\n" + "=" * 70)
-    print("STAGE 1: OMOP → MEDS UNSORTED")
-    print("=" * 70)
+    stage1_elapsed = 0
+    total_output_rows = 0
 
-    # Build global MEDS schema (ensures consistent types across all files)
-    meds_schema = get_meds_schema_from_config(config)
-    if verbose:
-        print(f"\n📋 Global MEDS schema:")
-        print(f"  Core columns: subject_id, time, code, numeric_value, text_value, end")
-        print(f"  Metadata columns: {len(meds_schema) - 6}")
+    if "transform" in stages_to_run:
+        print("\n" + "=" * 70)
+        print("STAGE 1: OMOP → MEDS UNSORTED")
+        print("=" * 70)
 
-    # Collect all files to process
-    tasks = []
+        meds_schema = get_meds_schema_from_config(config)
 
-    # Process canonical events
-    for event_name, event_config in config.get("canonical_events", {}).items():
-        table_name = event_config["table"]
-        files = find_omop_table_files(omop_dir, table_name)
+        # Collect tasks
+        tasks = []
 
-        fixed_code = event_config.get("code", f"MEDS_{event_name.upper()}")
+        # Canonical events
+        for event_name, event_config in config.get("canonical_events", {}).items():
+            table_name = event_config["table"]
+            files = find_omop_table_files(omop_dir, table_name)
+            fixed_code = event_config.get("code", f"MEDS_{event_name.upper()}")
 
-        for file_path in files:
-            tasks.append(
-                (
-                    file_path,
-                    table_name,
-                    event_config,
-                    primary_key,
-                    code_mapping_choice,
-                    unsorted_dir,
-                    meds_schema,
-                    concept_df_data,
-                    True,  # is_canonical
-                    fixed_code,
+            for file_path in files:
+                tasks.append(
+                    (
+                        file_path,
+                        table_name,
+                        event_config,
+                        primary_key,
+                        code_mapping_choice,
+                        unsorted_dir,
+                        meds_schema,
+                        concept_df_data,
+                        True,
+                        fixed_code,
+                    )
                 )
-            )
 
-    # Process regular tables
-    for table_name, table_config in config.get("tables", {}).items():
-        files = find_omop_table_files(omop_dir, table_name)
+        # Regular tables
+        for table_name, table_config in config.get("tables", {}).items():
+            files = find_omop_table_files(omop_dir, table_name)
 
-        for file_path in files:
-            tasks.append(
-                (
-                    file_path,
-                    table_name,
-                    table_config,
-                    primary_key,
-                    code_mapping_choice,
-                    unsorted_dir,
-                    meds_schema,
-                    concept_df_data,
-                    False,  # is_canonical
-                    None,  # fixed_code
+            for file_path in files:
+                tasks.append(
+                    (
+                        file_path,
+                        table_name,
+                        table_config,
+                        primary_key,
+                        code_mapping_choice,
+                        unsorted_dir,
+                        meds_schema,
+                        concept_df_data,
+                        False,
+                        None,
+                    )
                 )
-            )
 
-    print(f"\nProcessing {len(tasks)} files with {num_workers} workers...")
+        print(f"\nProcessing {len(tasks)} files with {num_workers} workers...")
 
-    # DEBUG: Process first file only for testing
-    if verbose and len(tasks) > 0:
-        print(f"\n🔍 DEBUG: Processing first file to test...")
-        test_result = process_omop_file_worker(tasks[0])
-        print(f"   Test result: {test_result}")
-        if test_result["success"]:
-            print(f"   ✅ First file processed successfully")
-            print(f"   Input: {test_result['input_rows']:,} rows")
-            print(f"   Output: {test_result['output_rows']:,} rows")
-            print(f"   Concept DF size: {test_result.get('concept_df_size', 0):,}")
+        stage1_start = time.time()
+
+        if num_workers > 1:
+            # Thread config already set globally above
+            with mp.Pool(processes=num_workers) as pool:
+                results = list(
+                    tqdm(
+                        pool.imap_unordered(process_omop_file_worker, tasks),
+                        total=len(tasks),
+                        desc="Processing OMOP files",
+                    )
+                )
         else:
-            print(f"   ❌ First file failed: {test_result.get('error', 'Unknown')}")
+            results = [process_omop_file_worker(task) for task in tqdm(tasks, desc="Processing")]
+
+        stage1_elapsed = time.time() - stage1_start
+
+        # Report Stage 1 results (detailed, like omop_refactor.py)
+        successes = [r for r in results if r["success"]]
+        failures = [r for r in results if not r["success"]]
+        total_input_rows = sum(r.get("input_rows", 0) for r in successes)
+        total_output_rows = sum(r.get("output_rows", 0) for r in successes)
+        total_filtered_rows = sum(r.get("filtered_rows", 0) for r in successes)
+
+        print(f"\n{'=' * 70}")
+        print("STAGE 1 RESULTS")
+        print(f"{'=' * 70}")
+        print(f"Files processed:  {len(results)}")
+        print(f"Input rows:       {total_input_rows:,}")
+        print(f"Output rows:      {total_output_rows:,}")
+        print(f"Filtered rows:    {total_filtered_rows:,}")
+
+        if total_input_rows > 0:
+            retention_pct = 100 * total_output_rows / total_input_rows
+            print(f"Retention:        {retention_pct:.1f}%")
+
+        print(f"Time:             {stage1_elapsed:.2f}s")
+
+        # Detailed breakdown by table
+        print(f"\nPer-table breakdown:")
+        by_table = {}
+        for r in successes:
+            table = r.get("table", "unknown")
+            if table not in by_table:
+                by_table[table] = {
+                    "files": 0,
+                    "input": 0,
+                    "output": 0,
+                    "filtered": 0,
+                    "code_mapping_used": r.get("code_mapping_used", "unknown"),
+                    "has_concept_mapping": r.get("has_concept_mapping", False),
+                }
+            by_table[table]["files"] += 1
+            by_table[table]["input"] += r.get("input_rows", 0)
+            by_table[table]["output"] += r.get("output_rows", 0)
+            by_table[table]["filtered"] += r.get("filtered_rows", 0)
+
+        # Check concept DF size from first result
+        concept_df_size = successes[0].get("concept_df_size", 0) if successes else 0
+        print(f"   Concept DataFrame size: {concept_df_size:,} concepts")
         print()
 
-    # Process in parallel
-    stage1_start = time.time()
-
-    if num_workers > 1:
-        os.environ["POLARS_MAX_THREADS"] = "1"
-        with mp.Pool(processes=num_workers) as pool:
-            results = list(
-                tqdm(
-                    pool.imap_unordered(process_omop_file_worker, tasks),
-                    total=len(tasks),
-                    desc="Processing OMOP files",
-                )
+        for table, stats in sorted(by_table.items(), key=lambda x: x[1]["input"], reverse=True):
+            retention = 100 * stats["output"] / stats["input"] if stats["input"] > 0 else 0
+            mapping_used = stats["code_mapping_used"]
+            
+            # Simplify display: if using template, just show "template" regardless of base strategy
+            if "+template" in mapping_used:
+                mapping_used = "template"
+            
+            print(
+                f"   {table:30s} [{mapping_used:20s}] {stats['files']:4d} files  "
+                f"{stats['input']:>13,} -> {stats['output']:>13,} rows ({retention:5.1f}%)"
             )
+
+        if failures:
+            print(f"\nWARNING: {len(failures)} files failed:")
+            for f in failures[:10]:  # Show first 10
+                print(f"  - {f.get('table', 'unknown'):20s} / {f['file']}: {f.get('error', 'Unknown error')}")
+
+        # Check what was actually written to disk
+        written_files = list(unsorted_dir.glob("*.parquet"))
+        print(f"\nFiles written to {unsorted_dir}:")
+        print(f"  Total files: {len(written_files)}")
+        if len(written_files) > 0:
+            total_size = sum(f.stat().st_size for f in written_files) / 1024 / 1024
+            print(f"  Total size:  {total_size:.1f} MB")
+        print(f"{'=' * 70}")
     else:
-        results = []
-        for task in tqdm(tasks, desc="Processing OMOP files"):
-            results.append(process_omop_file_worker(task))
+        print("\nSkipping Stage 1 (transform)")
+        # Check if unsorted data exists
+        if not unsorted_dir.exists() or not list(unsorted_dir.glob("*.parquet")):
+            print(f"ERROR: No unsorted data found at {unsorted_dir}")
+            print(f"  Run with --pipeline transform first!")
+            sys.exit(1)
 
-    stage1_elapsed = time.time() - stage1_start
+    # ========================================================================
+    # STAGE 2: Streaming External Sort (Polars 1.x)
+    # ========================================================================
 
-    # Report results
-    successes = [r for r in results if r["success"]]
-    failures = [r for r in results if not r["success"]]
-    total_input_rows = sum(r.get("input_rows", 0) for r in successes)
-    total_output_rows = sum(r.get("output_rows", 0) for r in successes)
-    total_filtered_rows = sum(r.get("filtered_rows", 0) for r in successes)
+    stage2_elapsed = 0
 
-    print(f"\n{'=' * 70}")
-    print("STAGE 1 RESULTS")
-    print(f"{'=' * 70}")
-    print(f"Files processed:  {len(results)}")
-    print(f"Input rows:       {total_input_rows:,}")
-    print(f"Output rows:      {total_output_rows:,}")
-    print(f"Filtered rows:    {total_filtered_rows:,}")
+    if "partition" in stages_to_run or "merge" in stages_to_run:
+        stage2_start = time.time()
 
-    if total_input_rows > 0:
-        retention_pct = 100 * total_output_rows / total_input_rows
-        print(f"Retention:        {retention_pct:.1f}%")
+        # Determine which sub-stages to run
+        run_partition = "partition" in stages_to_run
+        run_merge = "merge" in stages_to_run
 
-    print(f"Time:             {stage1_elapsed:.2f}s")
-
-    # Detailed breakdown by table
-    print(f"\n📊 Per-table breakdown:")
-    by_table = {}
-    for r in successes:
-        table = r.get("table", "unknown")
-        if table not in by_table:
-            by_table[table] = {
-                "files": 0,
-                "input": 0,
-                "output": 0,
-                "filtered": 0,
-                "code_mapping_used": r.get("code_mapping_used", "unknown"),
-                "has_concept_mapping": r.get("has_concept_mapping", False),
-            }
-        by_table[table]["files"] += 1
-        by_table[table]["input"] += r.get("input_rows", 0)
-        by_table[table]["output"] += r.get("output_rows", 0)
-        by_table[table]["filtered"] += r.get("filtered_rows", 0)
-
-    # Check concept DF size from first result
-    concept_df_size = successes[0].get("concept_df_size", 0) if successes else 0
-    print(f"   Concept DataFrame size: {concept_df_size:,} concepts")
-    print()
-
-    for table, stats in sorted(by_table.items(), key=lambda x: x[1]["input"], reverse=True):
-        retention = 100 * stats["output"] / stats["input"] if stats["input"] > 0 else 0
-        mapping_used = stats["code_mapping_used"]
-        print(
-            f"   {table:25s} [{mapping_used:15s}]  {stats['files']:3d} files  {stats['input']:10,} → {stats['output']:10,} rows ({retention:5.1f}%)"
+        # Call sort with stage control
+        streaming_external_sort(
+            unsorted_dir=unsorted_dir,
+            output_dir=output_dir,
+            num_shards=num_shards,
+            chunk_rows=chunk_rows,
+            run_compression=run_compression,
+            final_compression=final_compression,
+            merge_workers=merge_workers,
+            verbose=verbose,
+            run_partition=run_partition,
+            run_merge=run_merge,
+            low_memory=low_memory,
+            row_group_size=row_group_size,
+            num_workers=num_workers,
         )
 
-    if failures:
-        print(f"\n⚠️  {len(failures)} files failed:")
-        for f in failures[:10]:  # Show first 10
-            print(f"   - {f.get('table', 'unknown'):20s} / {f['file']}: {f.get('error', 'Unknown error')}")
-            if "traceback" in f and verbose:
-                print(f"     {f['traceback']}")
-
-    # Check what was actually written to disk
-    written_files = list(unsorted_dir.glob("*.parquet"))
-    print(f"\n💾 Files written to {unsorted_dir}:")
-    print(f"   Total files: {len(written_files)}")
-    if len(written_files) > 0:
-        total_size = sum(f.stat().st_size for f in written_files) / 1024 / 1024
-        print(f"   Total size:  {total_size:.1f} MB")
-        print(f"   Files: {[f.name for f in written_files[:5]]}")
-        if len(written_files) > 5:
-            print(f"          ... and {len(written_files) - 5} more")
+        stage2_elapsed = time.time() - stage2_start
     else:
-        print(f"   ⚠️  NO FILES WRITTEN!")
+        print("\nSkipping Stage 2 (sort)")
 
-    # ========================================================================
-    # STAGE 2: External sort (partition + sort via meds_etl_cpp or Python)
-    # ========================================================================
-
-    print("\n" + "=" * 70)
-    print("STAGE 2: EXTERNAL SORT (partition + sort)")
-    print("=" * 70)
-
-    stage2_start = time.time()
-
-    # Determine number of shards (priority: CLI arg > config > default)
-    if num_shards is None:
-        num_shards = config.get("num_shards", 100)
-
-    if verbose:
-        print(f"\n📊 Configuration:")
-        print(f"  Shards: {num_shards}")
-        print(f"  Workers: {num_workers}")
-
-    # Determine which backend to use
-    if low_memory:
-        # Sequential low-memory mode (single worker)
-        print(f"\n🔧 Low-memory mode enabled")
-        sequential_shard_sort(unsorted_dir, output_dir, num_shards, verbose=verbose)
-
-    elif parallel_shards:
-        # Parallel shard mode (each worker processes one shard at a time)
-        print(f"\n🔧 Parallel shard mode enabled")
-        parallel_shard_sort(unsorted_dir, output_dir, num_shards, num_workers, verbose=verbose)
-
-    else:
-        # Standard mode: try C++ backend, fallback to Python
-        use_cpp = False
-
-        if backend in ["cpp", "auto"]:
-            try:
-                import meds_etl_cpp
-
-                use_cpp = True
-            except ImportError:
-                if backend == "cpp":
-                    print(f"\n❌ ERROR: meds_etl_cpp not available but --backend cpp was specified")
-                    sys.exit(1)
-                elif backend == "auto":
-                    print(f"\n⚠️  meds_etl_cpp not available, using Python fallback...")
-
-        if use_cpp:
-            print(f"\n✅ Using meds_etl_cpp (C++) for external sort...")
-            print(f"   Memory-bounded, multi-threaded, optimized k-way merge")
-
-            import meds_etl_cpp
-
-            meds_etl_cpp.perform_etl(
-                str(temp_dir),  # Source: temp/ with metadata/ and unsorted_data/
-                str(output_dir / "result"),  # Target
-                num_shards,
-                num_workers,
-            )
-
-            print(f"   ✅ C++ external sort complete")
-        else:
-            print(f"\n⚠️  Using Python/Polars for sorting...")
-            print(f"   Warning: Python sorting loads entire shards into memory!")
-            print(f"   For large datasets, install meds_etl_cpp for memory-bounded sorting.")
-
-            # Python fallback (loads shards into memory - not ideal for large data)
-            meds_etl.unsorted.sort(
-                source_unsorted_path=str(temp_dir),
-                target_meds_path=str(output_dir / "result"),
-                num_shards=num_shards,
-                num_proc=num_workers,
-                backend="polars",
-            )
-
-    # Move final data to output (applies to all backends)
-    result_data_dir = output_dir / "result" / "data"
-    if result_data_dir.exists():
-        if final_dir.exists():
-            shutil.rmtree(final_dir)
-        shutil.move(str(result_data_dir), str(final_dir))
-        shutil.rmtree(output_dir / "result")
-
-    stage2_elapsed = time.time() - stage2_start
-
-    if verbose:
-        print(f"\n📊 Stage 2 Results:")
-        print(f"  Time: {stage2_elapsed:.2f}s")
-
-    print(f"\n✅ Stage 2 complete: {stage2_elapsed:.2f}s")
-
-    # Cleanup
+    # Cleanup temp
     print(f"\nCleaning up temporary directory...")
     shutil.rmtree(temp_dir)
+    print(f"  ✓ Removed: {temp_dir}")
 
     total_elapsed = stage1_elapsed + stage2_elapsed
 
     print("\n" + "=" * 70)
     print("ETL COMPLETE")
     print("=" * 70)
+    print(f"Stage 1 time: {stage1_elapsed:.2f}s")
+    print(f"Stage 2 time: {stage2_elapsed:.2f}s")
     print(f"Total time:   {total_elapsed:.2f}s")
     print(f"Total rows:   {total_output_rows:,}")
     if total_output_rows > 0:
         print(f"Throughput:   {total_output_rows/total_elapsed:,.0f} rows/s")
-    print(f"Output dir:   {final_dir}")
+    print(f"Output dir:   {output_dir / 'data'}")
     print("=" * 70)
 
 
@@ -1737,92 +1895,99 @@ def run_omop_to_meds_etl(
 # ============================================================================
 
 
-def main():
-    parser = argparse.ArgumentParser(description="OMOP to MEDS ETL Pipeline (Refactored)")
+if __name__ == "__main__":
+    import argparse
 
+    parser = argparse.ArgumentParser(description="OMOP to MEDS ETL with Polars Streaming")
+
+    parser.add_argument("--omop_dir", required=True, help="OMOP data directory")
+    parser.add_argument("--output_dir", required=True, help="Output directory")
+    parser.add_argument("--config", required=True, help="ETL config JSON")
+    parser.add_argument("--workers", type=int, default=8, help="Stage 1 workers")
+    parser.add_argument("--shards", type=int, default=None, help="Number of shards")
+    parser.add_argument("--chunk_rows", type=int, default=10_000_000, help="Rows per sorted run")
+    parser.add_argument("--code_mapping", choices=["auto", "concept_id", "source_value"], default="auto")
     parser.add_argument(
-        "--omop_dir",
-        required=True,
-        help="Path to OMOP data directory (Parquet files)",
+        "--run_compression",
+        choices=["lz4", "zstd", "snappy", "uncompressed"],
+        default="lz4",
+        help="Compression for intermediate runs (default: lz4)",
     )
     parser.add_argument(
-        "--output_dir",
-        required=True,
-        help="Output directory for MEDS data",
+        "--final_compression",
+        choices=["zstd", "snappy", "lz4", "uncompressed"],
+        default="zstd",
+        help="Compression for final output (default: zstd)",
     )
     parser.add_argument(
-        "--config",
-        required=True,
-        help="Path to ETL config JSON file",
+        "--pipeline",
+        choices=["all", "transform", "partition", "merge", "sort"],
+        default="all",
+        help="Which pipeline stages to run (default: all)",
     )
     parser.add_argument(
-        "--workers",
+        "--merge_workers",
         type=int,
-        default=mp.cpu_count(),
-        help="Number of worker processes (default: all CPUs)",
+        default=0,
+        help="Merge workers (0=auto/half cores, 1=sequential/low memory, N=parallel)",
     )
-    parser.add_argument(
-        "--shards",
+    
+    # Memory configuration arguments
+    memory_group = parser.add_argument_group("Memory Configuration", 
+                                              "Control memory usage and profiling (important for laptops)")
+    memory_group.add_argument(
+        "--low_memory",
+        action="store_true",
+        help="Enable Polars low_memory mode (smaller batches, less RAM). Recommended for 32-64GB laptops.",
+    )
+    memory_group.add_argument(
+        "--row_group_size",
+        type=int,
+        default=100_000,
+        help="Rows per Parquet row group. Smaller = less memory. (default: 100_000)",
+    )
+    memory_group.add_argument(
+        "--polars_threads",
         type=int,
         default=None,
-        help="Number of output shards (default: from config or 100)",
+        help="Max threads for Polars (overrides POLARS_MAX_THREADS env var). Default: 1 for multiprocessing",
     )
-    parser.add_argument(
-        "--backend",
-        choices=["cpp", "polars", "auto"],
-        default="auto",
-        help="Stage 2 backend: 'auto' (try cpp, fallback polars), 'cpp' (meds_etl_cpp only), 'polars' (Python only). Default: auto",
+    memory_group.add_argument(
+        "--rayon_threads",
+        type=int,
+        default=None,
+        help="Max threads for Rayon (overrides RAYON_NUM_THREADS env var). Default: 1 for multiprocessing",
     )
-    parser.add_argument(
-        "--code_mapping",
-        choices=["auto", "concept_id", "source_value"],
-        default="auto",
-        help=(
-            "Code mapping strategy: "
-            "'concept_id' (map via OMOP concept table OR use template if defined), "
-            "'source_value' (use source column directly OR use template if defined). "
-            "Note: 'template' is specified within concept_id or source_value config, not as a separate choice. "
-            "Default: auto - try concept_id first, fallback to source_value"
-        ),
+    memory_group.add_argument(
+        "--process_method",
+        choices=["spawn", "fork"],
+        default="spawn",
+        help="Multiprocessing start method. 'spawn' = better memory isolation (default), 'fork' = faster startup",
     )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable verbose output",
-    )
-    parser.add_argument(
-        "--no-optimize-concepts",
-        dest="optimize_concepts",
-        action="store_false",
-        help="Disable concept map optimization (default: enabled)",
-    )
-    parser.add_argument(
-        "--low-memory",
-        action="store_true",
-        help="Use sequential shard processing (slowest, minimal memory usage - processes one shard at a time)",
-    )
-    parser.add_argument(
-        "--parallel-shards",
-        action="store_true",
-        help="Use parallel shard processing (each worker processes one shard at a time - moderate memory, faster than --low-memory)",
-    )
+    
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--no-optimize-concepts", dest="optimize_concepts", action="store_false")
 
     args = parser.parse_args()
 
-    run_omop_to_meds_etl(
+    run_omop_to_meds_streaming(
         omop_dir=Path(args.omop_dir),
         output_dir=Path(args.output_dir),
         config_path=Path(args.config),
         num_workers=args.workers,
         num_shards=args.shards,
-        backend=args.backend,
         code_mapping_mode=args.code_mapping,
         verbose=args.verbose,
         optimize_concepts=args.optimize_concepts,
+        chunk_rows=args.chunk_rows,
+        run_compression=args.run_compression,
+        final_compression=args.final_compression,
+        merge_workers=args.merge_workers,
+        pipeline_stages=args.pipeline,
+        # Memory configuration
         low_memory=args.low_memory,
-        parallel_shards=args.parallel_shards,
+        row_group_size=args.row_group_size,
+        polars_threads=args.polars_threads,
+        rayon_threads=args.rayon_threads,
+        process_method=args.process_method,
     )
-
-
-if __name__ == "__main__":
-    main()

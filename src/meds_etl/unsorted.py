@@ -312,4 +312,3 @@ def sort_main():
     parser.add_argument("--backend", type=str, default="polars")
     args = parser.parse_args()
     sort(**vars(args))
-    

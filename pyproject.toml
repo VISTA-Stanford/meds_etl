@@ -23,11 +23,22 @@ dependencies = [
 cpp = [
     "meds_etl_cpp == 0.3.4",
 ]
+dev = [
+    "pytest >= 9.0",
+    "pytest-cov >= 4.0",
+    "black >= 24.0",
+    "isort >= 5.13",
+    "ruff >= 0.1.0",
+]
+tests = [
+    "pytest >= 9.0",
+]
 
 
 [project.scripts]
 meds_etl_mimic = "meds_etl.mimic:main"
 meds_etl_omop = "meds_etl.omop:main"
+meds_etl_omop_refactor = "meds_etl.omop_refactor:main"
 meds_etl_omop_scalable = "meds_etl.omop_scalable:main"
 meds_etl_omop_scalable_v2 = "meds_etl.omop_scalable_v2:main"
 meds_etl_sort = "meds_etl.unsorted:sort_main"
@@ -46,3 +57,29 @@ line_length = 120
 [tool.black]
 line_length = 120
 target_version = ['py310']
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+]
+ignore = [
+    "E501",  # line too long (handled by black)
+    "B008",  # do not perform function calls in argument defaults
+    "C901",  # too complex
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"

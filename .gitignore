@@ -1,4 +1,13 @@
 _version.py
+uv.lock
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -123,12 +132,15 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
 .venv
+.venv/
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+*.env
 
 # Spyder project settings
 .spyderproject
