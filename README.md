@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="assets/meds-etl-logo.png" alt="pipelines" width="145">
+  <img src="assets/logo.png" alt="pipelines" width="175">
   <br>
   MEDS ETL
   <br>
