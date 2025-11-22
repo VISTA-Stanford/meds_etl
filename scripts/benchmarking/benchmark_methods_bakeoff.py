@@ -28,6 +28,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+import importlib.util
 
 
 class BenchmarkLogger:
@@ -47,6 +48,11 @@ class BenchmarkLogger:
     
     def close(self):
         self.file_handle.close()
+
+
+def check_cpp_backend_available():
+    """Check if meds_etl_cpp is installed"""
+    return importlib.util.find_spec("meds_etl_cpp") is not None
 
 
 def run_command(cmd, logger, method_name):
@@ -163,6 +169,13 @@ def main():
         default="5.4",
         help="OMOP version for omop.py (default: 5.4)"
     )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        choices=["polars", "cpp"],
+        default="polars",
+        help="Backend for omop.py legacy method (default: polars)"
+    )
     
     # Method selection
     parser.add_argument(
@@ -181,6 +194,17 @@ def main():
     )
     
     args = parser.parse_args()
+    
+    # Check if cpp backend is requested and available
+    if args.backend == "cpp" and "omop" in args.methods:
+        if not check_cpp_backend_available():
+            print("ERROR: cpp backend requested but meds_etl_cpp is not installed!")
+            print("\nTo install cpp backend:")
+            print("  pip install meds_etl[cpp]")
+            print("  # or")
+            print("  uv pip install meds_etl[cpp]")
+            print("\nFalling back to polars backend...")
+            args.backend = "polars"
     
     # Determine which methods to run
     if "all" in args.methods:
@@ -208,6 +232,10 @@ def main():
     logger.log(f"Output base: {args.base_output_dir}")
     logger.log(f"Shards: {args.num_shards}")
     logger.log(f"Workers: {args.num_workers}")
+    logger.log(f"Backend (omop.py): {args.backend}")
+    if args.backend == "cpp":
+        cpp_available = check_cpp_backend_available()
+        logger.log(f"meds_etl_cpp available: {cpp_available}")
     logger.log(f"Methods: {', '.join(methods_to_run)}")
     logger.log(f"Log file: {log_file}")
     logger.log("")
@@ -218,8 +246,8 @@ def main():
     # 1. omop.py (legacy)
     # ========================================================================
     if "omop" in methods_to_run:
-        method_name = "omop.py (legacy)"
-        output_dir = base_output / "omop_output"
+        method_name = f"omop.py (legacy - {args.backend})"
+        output_dir = base_output / f"omop_output_{args.backend}"
         
         cmd = [
             sys.executable, "-m", "meds_etl.omop",
@@ -227,7 +255,7 @@ def main():
             str(output_dir),
             "--num_shards", str(args.num_shards),
             "--num_proc", str(args.num_workers),
-            "--backend", "polars",
+            "--backend", args.backend,
             "--omop_version", args.omop_version,
             "--force_refresh"
         ]
@@ -239,11 +267,12 @@ def main():
         success, elapsed = run_command(cmd, logger, method_name)
         stats = get_output_stats(output_dir, logger) if success else None
         
-        results["omop"] = {
+        results[f"omop_{args.backend}"] = {
             "success": success,
             "elapsed_seconds": elapsed,
             "elapsed_minutes": elapsed / 60,
             "output_dir": str(output_dir),
+            "backend": args.backend,
             "stats": stats
         }
         
@@ -346,10 +375,11 @@ def main():
     logger.log("=" * 80)
     
     # Calculate speedup
-    if "omop" in results and "streaming" in results:
-        if results["omop"]["success"] and results["streaming"]["success"]:
-            speedup = results["omop"]["elapsed_seconds"] / results["streaming"]["elapsed_seconds"]
-            logger.log(f"Speedup (omop → streaming): {speedup:.2f}x")
+    omop_key = f"omop_{args.backend}"
+    if omop_key in results and "streaming" in results:
+        if results[omop_key]["success"] and results["streaming"]["success"]:
+            speedup = results[omop_key]["elapsed_seconds"] / results["streaming"]["elapsed_seconds"]
+            logger.log(f"Speedup (omop[{args.backend}] → streaming): {speedup:.2f}x")
     
     if "streaming" in results and "refactor" in results:
         if results["streaming"]["success"] and results["refactor"]["success"]:

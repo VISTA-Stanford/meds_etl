@@ -31,6 +31,7 @@ Output:
 
 import argparse
 import json
+import multiprocessing
 import os
 import subprocess
 import sys
@@ -221,14 +222,34 @@ def get_output_stats(output_dir, logger):
         return None
 
 
-def generate_experiments(experiment_type, baseline_params):
-    """Generate list of parameter combinations to test"""
+def generate_experiments(experiment_type, baseline_params, max_cpus=None):
+    """Generate list of parameter combinations to test
+    
+    Args:
+        experiment_type: Type of experiment to run
+        baseline_params: Default parameters for experiments
+        max_cpus: Maximum number of CPUs available (auto-detected if None)
+    """
+    
+    if max_cpus is None:
+        max_cpus = multiprocessing.cpu_count()
     
     experiments = []
     
     if experiment_type == "workers":
-        # Test different worker counts
-        for workers in [1, 2, 4, 8, 16]:
+        # Test different worker counts, capped by available CPUs
+        # Use powers of 2 up to max_cpus, plus max_cpus itself
+        worker_options = [1]
+        current = 2
+        while current <= max_cpus:
+            worker_options.append(current)
+            current *= 2
+        # Add max_cpus if not already included
+        if max_cpus not in worker_options and max_cpus > 1:
+            worker_options.append(max_cpus)
+        worker_options.sort()
+        
+        for workers in worker_options:
             params = baseline_params.copy()
             params["workers"] = workers
             experiments.append(params)
@@ -270,8 +291,13 @@ def generate_experiments(experiment_type, baseline_params):
             experiments.append(params)
     
     elif experiment_type == "workers_and_shards":
-        # Test combinations of workers and shards
-        worker_counts = [4, 8, 16]
+        # Test combinations of workers and shards, capped by available CPUs
+        worker_counts = [w for w in [4, 8, 16, 32] if w <= max_cpus]
+        # Always include max_cpus if it's not in the list and > 1
+        if max_cpus not in worker_counts and max_cpus > 1:
+            worker_counts.append(max_cpus)
+        worker_counts.sort()
+        
         shard_counts = [10, 20, 50]
         for workers, shards in itertools.product(worker_counts, shard_counts):
             params = baseline_params.copy()
@@ -281,7 +307,12 @@ def generate_experiments(experiment_type, baseline_params):
     
     elif experiment_type == "full":
         # Full grid search (warning: can be many experiments!)
-        worker_counts = [4, 8, 16]
+        # Cap worker counts by available CPUs
+        worker_counts = [w for w in [4, 8, 16, 32] if w <= max_cpus]
+        if max_cpus not in worker_counts and max_cpus > 1:
+            worker_counts.append(max_cpus)
+        worker_counts.sort()
+        
         shard_counts = [10, 20]
         chunk_rows_options = [5_000_000, 10_000_000]
         
@@ -365,6 +396,9 @@ def main():
     
     args = parser.parse_args()
     
+    # Detect system resources
+    max_cpus = multiprocessing.cpu_count()
+    
     # Create base output directory
     base_output = Path(args.base_output_dir)
     base_output.mkdir(parents=True, exist_ok=True)
@@ -380,16 +414,24 @@ def main():
     logger.log("TUNING EXPERIMENTS: omop_streaming.py")
     logger.log("=" * 80)
     logger.log(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.log(f"System CPUs: {max_cpus}")
     logger.log(f"OMOP data: {args.omop_dir}")
     logger.log(f"Config: {args.config}")
     logger.log(f"Output base: {args.base_output_dir}")
     logger.log(f"Experiment type: {args.experiment}")
     logger.log(f"Log file: {log_file}")
     logger.log("")
+    logger.log(f"Note: Worker counts will be capped at {max_cpus} (available CPUs)")
+    logger.log("")
     
-    # Baseline parameters
+    # Baseline parameters - cap baseline workers at available CPUs
+    baseline_workers = min(args.baseline_workers, max_cpus)
+    if baseline_workers < args.baseline_workers:
+        logger.log(f"Note: Baseline workers reduced from {args.baseline_workers} to {baseline_workers} (max available CPUs)")
+        logger.log("")
+    
     baseline_params = {
-        "workers": args.baseline_workers,
+        "workers": baseline_workers,
         "shards": args.baseline_shards,
         "chunk_rows": args.baseline_chunk_rows,
         "code_mapping": "auto",
@@ -401,8 +443,8 @@ def main():
         "verbose": args.verbose
     }
     
-    # Generate experiments
-    experiments = generate_experiments(args.experiment, baseline_params)
+    # Generate experiments (pass max_cpus to cap worker counts)
+    experiments = generate_experiments(args.experiment, baseline_params, max_cpus=max_cpus)
     
     logger.log(f"Generated {len(experiments)} experiments")
     logger.log("")

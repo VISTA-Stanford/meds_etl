@@ -33,6 +33,11 @@ dev = [
 tests = [
     "pytest >= 9.0",
 ]
+benchmarking = [
+    "numpy >= 1.24",
+    "matplotlib >= 3.7",
+    "pandas >= 2.0",
+]
 
 
 [project.scripts]
