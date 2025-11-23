@@ -270,6 +270,7 @@ def main():
             "auto",
             "--process_method",
             "spawn",  # Force spawn for Linux stability
+            "--force-refresh",  # Always overwrite for benchmarking
         ]
 
         if args.verbose:
@@ -315,6 +316,7 @@ def main():
             "auto",
             "--process_method",
             "spawn",  # Force spawn for Linux stability
+            "--force-refresh",  # Always overwrite for benchmarking
         ]
 
         if args.verbose:

@@ -1321,6 +1321,7 @@ def run_omop_to_meds_etl(
     low_memory: bool = False,
     parallel_shards: bool = False,
     process_method: str = "spawn",
+    force_refresh: bool = False,
 ):
     """
     Run OMOP to MEDS ETL pipeline.
@@ -1349,6 +1350,7 @@ def run_omop_to_meds_etl(
         low_memory: If True, use sequential shard processing (slowest, minimal memory)
         parallel_shards: If True, use parallel shard processing (each worker processes one shard)
         process_method: Multiprocessing start method ('spawn' or 'fork'). Default 'spawn' for Linux stability.
+        force_refresh: If True, delete existing output directory before starting. If False, error if output exists.
 
     Sort options (Stage 2):
     - Default (backend='auto'): meds_etl_cpp if available, else unsorted.sort()
@@ -1387,7 +1389,35 @@ def run_omop_to_meds_etl(
     metadata_dir = temp_dir / "metadata"
     final_dir = output_dir / "data"
 
+    # Handle existing output directory
+    if output_dir.exists():
+        # Check if this looks like a previous ETL output (has data/ or metadata/ or temp/)
+        has_etl_output = any(
+            [
+                (output_dir / "data").exists(),
+                (output_dir / "metadata").exists(),
+                (output_dir / "temp").exists(),
+            ]
+        )
+
+        if has_etl_output:
+            if force_refresh:
+                print(f"\n🔄 Force refresh enabled - removing existing output directory...")
+                shutil.rmtree(output_dir)
+                print(f"   ✓ Removed: {output_dir}")
+                output_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                print(f"\n❌ ERROR: Output directory already exists and contains ETL data!")
+                print(f"   Directory: {output_dir}")
+                print(f"   Found: {[d.name for d in output_dir.iterdir() if d.is_dir()]}")
+                print(f"\n   Options:")
+                print(f"   1. Use --force-refresh to overwrite existing data")
+                print(f"   2. Choose a different output directory")
+                print(f"   3. Manually delete the directory: rm -rf {output_dir}")
+                sys.exit(1)
+
     # Clean and create directories
+    output_dir.mkdir(parents=True, exist_ok=True)
     if temp_dir.exists():
         shutil.rmtree(temp_dir)
     temp_dir.mkdir(parents=True)
@@ -1828,6 +1858,11 @@ def main():
         default="spawn",
         help="Multiprocessing start method. 'spawn' = better memory isolation and Linux stability (default), 'fork' = faster startup but can cause issues on Linux",
     )
+    parser.add_argument(
+        "--force-refresh",
+        action="store_true",
+        help="Force refresh: delete existing output directory if it exists (default: error if output exists)",
+    )
 
     args = parser.parse_args()
 
@@ -1844,6 +1879,7 @@ def main():
         low_memory=args.low_memory,
         parallel_shards=args.parallel_shards,
         process_method=args.process_method,
+        force_refresh=args.force_refresh,
     )
 
 

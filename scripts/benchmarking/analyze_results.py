@@ -448,10 +448,11 @@ def generate_performance_report(all_results, output_dir):
             
             f.write("Based on benchmark results, the recommended configuration is:\n\n")
             f.write("```bash\n")
-            f.write("python -m meds_etl.omop_streaming \\\n")
+            f.write("python -m meds_etl.omop_refactor_streaming \\\n")
             f.write("  --omop_dir INPUT_DIR \\\n")
             f.write("  --output_dir OUTPUT_DIR \\\n")
             f.write("  --config CONFIG.json \\\n")
+            f.write("  --force-refresh \\\n")
             f.write(f"  --workers {params.get('workers', 8)} \\\n")
             f.write(f"  --shards {params.get('shards', 10)} \\\n")
             f.write(f"  --chunk_rows {params.get('chunk_rows', 10000000)} \\\n")
