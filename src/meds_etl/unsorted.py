@@ -180,7 +180,7 @@ def sort_polars(
             else:
                 assert v == type_dict[k], f"We got different types for column {k}, {v} vs {type_dict[k]}"
 
-    property_columns_info: Dict[str, pl.DataType] = dict()
+    property_columns_info: Dict[str, pl.DataType] = {}
     if num_proc != 1:
         with mp.Pool(num_proc) as pool:
             for columns_info in pool.imap_unordered(get_columns, tasks):
@@ -234,7 +234,9 @@ def sort_polars(
 
         all_events = pl.concat(events)
 
-        sorted_events = all_events.drop("shard").sort(by=(pl.col("subject_id"), pl.col("time"), pl.col("code")), nulls_last=False)
+        sorted_events = all_events.drop("shard").sort(
+            by=(pl.col("subject_id"), pl.col("time"), pl.col("code")), nulls_last=False
+        )
 
         # We now have our data in the final form, grouped_by_subject, but we have to do one final transformation
         # We have to convert from polar's large_list to list because large_list is not supported by huggingface

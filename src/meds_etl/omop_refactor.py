@@ -26,12 +26,12 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import meds
 import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 from tqdm import tqdm
 
-import meds
 import meds_etl
 import meds_etl.unsorted
 
@@ -175,7 +175,7 @@ def validate_config_against_data(omop_dir: Path, config: Dict, code_mapping_choi
     tables_to_check = {}
 
     # Collect all tables from canonical_events
-    for event_name, event_config in config.get("canonical_events", {}).items():
+    for _event_name, event_config in config.get("canonical_events", {}).items():
         table_name = event_config["table"]
         if table_name not in tables_to_check:
             tables_to_check[table_name] = []
@@ -377,7 +377,7 @@ def build_concept_map(omop_dir: Path, verbose: bool = False) -> Tuple[pl.DataFra
     if rel_files:
         # Build temp dict for relationships
         concept_id_to_code = dict(
-            zip(concept_df_combined["concept_id"].to_list(), concept_df_combined["code"].to_list())
+            zip(concept_df_combined["concept_id"].to_list(), concept_df_combined["code"].to_list(), strict=False)
         )
 
         for rel_file in tqdm(rel_files, desc="Loading concept relationships"):
@@ -397,7 +397,7 @@ def build_concept_map(omop_dir: Path, verbose: bool = False) -> Tuple[pl.DataFra
                 .to_dict(as_series=False)
             )
 
-            for cid1, cid2 in zip(custom_rels["concept_id_1"], custom_rels["concept_id_2"]):
+            for cid1, cid2 in zip(custom_rels["concept_id_1"], custom_rels["concept_id_2"], strict=False):
                 if cid1 in concept_id_to_code and cid2 in concept_id_to_code:
                     code1 = concept_id_to_code[cid1]
                     code2 = concept_id_to_code[cid2]
@@ -596,11 +596,10 @@ def prescan_concept_ids(
         worker_sizes[min_worker] += size
 
     # Create worker arguments
-    worker_args = [(i, batch) for i, batch in enumerate(worker_loads)]
+    worker_args = list(enumerate(worker_loads))
 
     # Run workers in parallel with timeout protection
     import multiprocessing as mp
-    from multiprocessing.pool import AsyncResult
 
     all_concept_ids = set()
     total_errors = []
@@ -634,14 +633,14 @@ def prescan_concept_ids(
 
             except mp.TimeoutError:
                 print(f"  ⚠️  WARNING: Pre-scan timed out after {timeout_per_worker}s")
-                print(f"  ⚠️  Continuing without concept optimization (will use full concept table)")
+                print("  ⚠️  Continuing without concept optimization (will use full concept table)")
                 pool.terminate()
                 pool.join()
                 return set()  # Return empty set to use full concept table
 
     except Exception as e:
         print(f"  ⚠️  WARNING: Pre-scan failed: {e}")
-        print(f"  ⚠️  Continuing without concept optimization (will use full concept table)")
+        print("  ⚠️  Continuing without concept optimization (will use full concept table)")
         return set()
 
     return all_concept_ids
@@ -765,7 +764,7 @@ def transform_to_meds_unsorted(
         time_options.append(pl.col(fallback).cast(pl.Datetime("us")))
 
     if not time_options:
-        raise ValueError(f"No time_start field configured for table")
+        raise ValueError("No time_start field configured for table")
 
     time = pl.coalesce(time_options).alias("time") if len(time_options) > 1 else time_options[0].alias("time")
 
@@ -793,7 +792,7 @@ def transform_to_meds_unsorted(
             elif "source_value" in code_mappings:
                 actual_mapping_choice = "source_value"
             else:
-                raise ValueError(f"No code mappings defined for table")
+                raise ValueError("No code mappings defined for table")
         else:
             # CLI requested a specific mapping that doesn't exist for this table
             # Try to fall back intelligently
@@ -845,7 +844,7 @@ def transform_to_meds_unsorted(
             base_exprs.append(pl.col(code_field).cast(pl.Utf8).alias("code"))
 
         else:
-            raise ValueError(f"source_value mapping must have either 'field' or 'template'")
+            raise ValueError("source_value mapping must have either 'field' or 'template'")
 
     elif actual_mapping_choice == "concept_id":
         # Concept ID mapping - can use 'template' OR field-based concept lookup
@@ -888,19 +887,19 @@ def transform_to_meds_unsorted(
                 if fallback_concept_id is not None:
                     # Use fallback as literal concept_id, will be joined to get code
                     if concept_df is None or len(concept_df) == 0:
-                        raise ValueError(f"fallback_concept_id specified but concept_df not provided")
+                        raise ValueError("fallback_concept_id specified but concept_df not provided")
 
                     needs_concept_join = True
                     base_exprs.append(pl.lit(fallback_concept_id).cast(pl.Int64).alias("concept_id"))
                 else:
                     raise ValueError(
-                        f"concept_id mapping requested but no concept_id_field, "
-                        f"source_concept_id_field, fallback_concept_id, or template defined"
+                        "concept_id mapping requested but no concept_id_field, "
+                        "source_concept_id_field, fallback_concept_id, or template defined"
                     )
             else:
                 # Standard concept_id mapping with fields
                 if concept_df is None or len(concept_df) == 0:
-                    raise ValueError(f"concept_id mapping requested but concept_df not provided")
+                    raise ValueError("concept_id mapping requested but concept_df not provided")
 
                 needs_concept_join = True
 
@@ -1178,7 +1177,7 @@ def parallel_shard_sort(
 
     Writes to output_dir/result/data/ to match other backends.
     """
-    print(f"\n✅ Using parallel shard-based sort...")
+    print("\n✅ Using parallel shard-based sort...")
     print(f"   Workers: {num_workers}")
     print(f"   Shards: {num_shards}")
     print(f"   Memory usage: ~{num_workers} shards in RAM at once")
@@ -1216,7 +1215,7 @@ def parallel_shard_sort(
     failures = [r for r in results if not r["success"]]
     total_rows = sum(r["rows"] for r in successes)
 
-    print(f"\n   ✅ Parallel shard sort complete")
+    print("\n   ✅ Parallel shard sort complete")
     print(f"   Shards processed: {len(successes)}/{num_shards}")
     print(f"   Total rows: {total_rows:,}")
 
@@ -1247,9 +1246,9 @@ def sequential_shard_sort(
 
     Writes to output_dir/result/data/ to match other backends.
     """
-    print(f"\n✅ Using sequential low-memory sort...")
+    print("\n✅ Using sequential low-memory sort...")
     print(f"   Processing {num_shards} shards one at a time")
-    print(f"   Memory usage: ~1 shard in RAM at a time")
+    print("   Memory usage: ~1 shard in RAM at a time")
 
     # Create output directory (match other backends: output_dir/result/data/)
     result_dir = output_dir / "result"
@@ -1301,7 +1300,7 @@ def sequential_shard_sort(
         del shard_df
         del shard_data
 
-    print(f"\n   ✅ Sequential sort complete")
+    print("\n   ✅ Sequential sort complete")
     print(f"   Output: {final_data_dir}")
 
 
@@ -1396,17 +1395,17 @@ def run_omop_to_meds_etl(
 
         if has_etl_output:
             if force_refresh:
-                print(f"\n🔄 Force refresh enabled - removing existing output directory...")
+                print("\n🔄 Force refresh enabled - removing existing output directory...")
                 shutil.rmtree(output_dir)
                 print(f"   ✓ Removed: {output_dir}")
                 output_dir.mkdir(parents=True, exist_ok=True)
             else:
-                print(f"\n❌ ERROR: Output directory already exists and contains ETL data!")
+                print("\n❌ ERROR: Output directory already exists and contains ETL data!")
                 print(f"   Directory: {output_dir}")
                 print(f"   Found: {[d.name for d in output_dir.iterdir() if d.is_dir()]}")
-                print(f"\n   Options:")
-                print(f"   1. Use --force-refresh to overwrite existing data")
-                print(f"   2. Choose a different output directory")
+                print("\n   Options:")
+                print("   1. Use --force-refresh to overwrite existing data")
+                print("   2. Choose a different output directory")
                 print(f"   3. Manually delete the directory: rm -rf {output_dir}")
                 sys.exit(1)
 
@@ -1440,8 +1439,8 @@ def run_omop_to_meds_etl(
         concept_df, code_metadata = build_concept_map(omop_dir, verbose=verbose)
 
         if len(concept_df) == 0:
-            print(f"\n❌ ERROR: concept_id mapping requested but concept table not found!")
-            print(f"   Use --code_mapping source_value or template instead.")
+            print("\n❌ ERROR: concept_id mapping requested but concept table not found!")
+            print("   Use --code_mapping source_value or template instead.")
             sys.exit(1)
         else:
             print(f"  ✅ Loaded {len(concept_df):,} concepts")
@@ -1449,7 +1448,7 @@ def run_omop_to_meds_etl(
             # Optimize concept map by pre-scanning (99% memory reduction!)
             if optimize_concepts:
                 if verbose:
-                    print(f"\n📊 Optimizing concept map (pre-scanning data to find used concepts)...")
+                    print("\n📊 Optimizing concept map (pre-scanning data to find used concepts)...")
 
                 original_size = len(concept_df)
 
@@ -1509,8 +1508,8 @@ def run_omop_to_meds_etl(
     # Build global MEDS schema (ensures consistent types across all files)
     meds_schema = get_meds_schema_from_config(config)
     if verbose:
-        print(f"\n📋 Global MEDS schema:")
-        print(f"  Core columns: subject_id, time, code, numeric_value, text_value, end")
+        print("\n📋 Global MEDS schema:")
+        print("  Core columns: subject_id, time, code, numeric_value, text_value, end")
         print(f"  Metadata columns: {len(meds_schema) - 6}")
 
     # Collect all files to process
@@ -1563,11 +1562,11 @@ def run_omop_to_meds_etl(
 
     # DEBUG: Process first file only for testing
     if verbose and len(tasks) > 0:
-        print(f"\n🔍 DEBUG: Processing first file to test...")
+        print("\n🔍 DEBUG: Processing first file to test...")
         test_result = process_omop_file_worker(tasks[0])
         print(f"   Test result: {test_result}")
         if test_result["success"]:
-            print(f"   ✅ First file processed successfully")
+            print("   ✅ First file processed successfully")
             print(f"   Input: {test_result['input_rows']:,} rows")
             print(f"   Output: {test_result['output_rows']:,} rows")
             print(f"   Concept DF size: {test_result.get('concept_df_size', 0):,}")
@@ -1617,7 +1616,7 @@ def run_omop_to_meds_etl(
     print(f"Time:             {stage1_elapsed:.2f}s")
 
     # Detailed breakdown by table
-    print(f"\n📊 Per-table breakdown:")
+    print("\n📊 Per-table breakdown:")
     by_table = {}
     for r in successes:
         table = r.get("table", "unknown")
@@ -1665,7 +1664,7 @@ def run_omop_to_meds_etl(
         if len(written_files) > 5:
             print(f"          ... and {len(written_files) - 5} more")
     else:
-        print(f"   ⚠️  NO FILES WRITTEN!")
+        print("   ⚠️  NO FILES WRITTEN!")
 
     # ========================================================================
     # STAGE 2: External sort (partition + sort via meds_etl_cpp or Python)
@@ -1693,19 +1692,19 @@ def run_omop_to_meds_etl(
         num_shards = config.get("num_shards", 100)
 
     if verbose:
-        print(f"\n📊 Configuration:")
+        print("\n📊 Configuration:")
         print(f"  Shards: {num_shards}")
         print(f"  Workers: {num_workers}")
 
     # Determine which backend to use
     if low_memory:
         # Sequential low-memory mode (single worker)
-        print(f"\n🔧 Low-memory mode enabled")
+        print("\n🔧 Low-memory mode enabled")
         sequential_shard_sort(unsorted_dir, output_dir, num_shards, verbose=verbose)
 
     elif parallel_shards:
         # Parallel shard mode (each worker processes one shard at a time)
-        print(f"\n🔧 Parallel shard mode enabled")
+        print("\n🔧 Parallel shard mode enabled")
         parallel_shard_sort(unsorted_dir, output_dir, num_shards, num_workers, process_method, verbose=verbose)
 
     else:
@@ -1717,25 +1716,25 @@ def run_omop_to_meds_etl(
             try:
                 import meds_etl_cpp
 
-                print(f"\n✅ Using meds_etl_cpp (C++) for external sort...")
-                print(f"   Memory-bounded, multi-threaded, optimized k-way merge")
+                print("\n✅ Using meds_etl_cpp (C++) for external sort...")
+                print("   Memory-bounded, multi-threaded, optimized k-way merge")
             except ImportError:
-                print(f"\n❌ ERROR: meds_etl_cpp not available but --backend cpp was specified")
+                print("\n❌ ERROR: meds_etl_cpp not available but --backend cpp was specified")
                 sys.exit(1)
         elif backend == "auto":
             try:
-                import meds_etl_cpp
+                import meds_etl_cpp  # noqa: F401
 
-                print(f"\n✅ Using meds_etl_cpp (C++) for external sort...")
-                print(f"   Memory-bounded, multi-threaded, optimized k-way merge")
+                print("\n✅ Using meds_etl_cpp (C++) for external sort...")
+                print("   Memory-bounded, multi-threaded, optimized k-way merge")
             except ImportError:
-                print(f"\n⚠️  meds_etl_cpp not available, using Python fallback...")
-                print(f"   Warning: Python sorting loads entire shards into memory!")
+                print("\n⚠️  meds_etl_cpp not available, using Python fallback...")
+                print("   Warning: Python sorting loads entire shards into memory!")
                 backend = "polars"
         else:
-            print(f"\n⚠️  Using Python/Polars for sorting...")
-            print(f"   Warning: Python sorting loads entire shards into memory!")
-            print(f"   For large datasets, install meds_etl_cpp for memory-bounded sorting.")
+            print("\n⚠️  Using Python/Polars for sorting...")
+            print("   Warning: Python sorting loads entire shards into memory!")
+            print("   For large datasets, install meds_etl_cpp for memory-bounded sorting.")
 
         # Use the unified sort interface (same as omop.py)
         meds_etl.unsorted.sort(
@@ -1746,7 +1745,7 @@ def run_omop_to_meds_etl(
             backend=backend,
         )
 
-        print(f"   ✅ External sort complete")
+        print("   ✅ External sort complete")
 
     # Move final data to output (applies to all backends)
     result_data_dir = output_dir / "result" / "data"
@@ -1759,13 +1758,13 @@ def run_omop_to_meds_etl(
     stage2_elapsed = time.time() - stage2_start
 
     if verbose:
-        print(f"\n📊 Stage 2 Results:")
+        print("\n📊 Stage 2 Results:")
         print(f"  Time: {stage2_elapsed:.2f}s")
 
     print(f"\n✅ Stage 2 complete: {stage2_elapsed:.2f}s")
 
     # Cleanup
-    print(f"\nCleaning up temporary directory...")
+    print("\nCleaning up temporary directory...")
     shutil.rmtree(temp_dir)
 
     total_elapsed = stage1_elapsed + stage2_elapsed

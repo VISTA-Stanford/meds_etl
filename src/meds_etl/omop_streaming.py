@@ -11,25 +11,26 @@ and uses bounded memory through streaming.
 Based on external_sort.py approach.
 """
 
-from pathlib import Path
-import shutil
-from typing import Dict, List, Optional, Set, Tuple, Any
-import polars as pl
-import os
 import gc
+import os
+import shutil
 
 # Import Stage 1 from omop_refactor.py
 import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import polars as pl
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 import json
-import time
-from tqdm import tqdm
-import re
 import pickle
+import re
+import time
 import uuid
 
+from tqdm import tqdm
 
 # ============================================================================
 # SCHEMA UTILITIES (from omop_refactor.py)
@@ -171,7 +172,7 @@ def validate_config_against_data(omop_dir: Path, config: Dict, code_mapping_choi
     tables_to_check = {}
 
     # Collect all tables from canonical_events
-    for event_name, event_config in config.get("canonical_events", {}).items():
+    for _event_name, event_config in config.get("canonical_events", {}).items():
         table_name = event_config["table"]
         if table_name not in tables_to_check:
             tables_to_check[table_name] = []
@@ -371,7 +372,7 @@ def build_concept_map(omop_dir: Path, verbose: bool = False) -> Tuple[pl.DataFra
     if rel_files:
         # Build temp dict for relationships
         concept_id_to_code = dict(
-            zip(concept_df_combined["concept_id"].to_list(), concept_df_combined["code"].to_list())
+            zip(concept_df_combined["concept_id"].to_list(), concept_df_combined["code"].to_list(), strict=False)
         )
 
         for rel_file in tqdm(rel_files, desc="Loading concept relationships"):
@@ -391,7 +392,7 @@ def build_concept_map(omop_dir: Path, verbose: bool = False) -> Tuple[pl.DataFra
                 .to_dict(as_series=False)
             )
 
-            for cid1, cid2 in zip(custom_rels["concept_id_1"], custom_rels["concept_id_2"]):
+            for cid1, cid2 in zip(custom_rels["concept_id_1"], custom_rels["concept_id_2"], strict=False):
                 if cid1 in concept_id_to_code and cid2 in concept_id_to_code:
                     code1 = concept_id_to_code[cid1]
                     code2 = concept_id_to_code[cid2]
@@ -591,11 +592,10 @@ def prescan_concept_ids(
         worker_sizes[min_worker] += size
 
     # Create worker arguments
-    worker_args = [(i, batch) for i, batch in enumerate(worker_loads)]
+    worker_args = list(enumerate(worker_loads))
 
     # Run workers in parallel with timeout protection
     import multiprocessing as mp
-    from multiprocessing.pool import AsyncResult
 
     all_concept_ids = set()
     total_errors = []
@@ -629,14 +629,14 @@ def prescan_concept_ids(
 
             except mp.TimeoutError:
                 print(f"  ⚠️  WARNING: Pre-scan timed out after {timeout_per_worker}s")
-                print(f"  ⚠️  Continuing without concept optimization (will use full concept table)")
+                print("  ⚠️  Continuing without concept optimization (will use full concept table)")
                 pool.terminate()
                 pool.join()
                 return set()  # Return empty set to use full concept table
 
     except Exception as e:
         print(f"  ⚠️  WARNING: Pre-scan failed: {e}")
-        print(f"  ⚠️  Continuing without concept optimization (will use full concept table)")
+        print("  ⚠️  Continuing without concept optimization (will use full concept table)")
         return set()
 
     return all_concept_ids
@@ -760,7 +760,7 @@ def transform_to_meds_unsorted(
         time_options.append(pl.col(fallback).cast(pl.Datetime("us")))
 
     if not time_options:
-        raise ValueError(f"No time_start field configured for table")
+        raise ValueError("No time_start field configured for table")
 
     time = pl.coalesce(time_options).alias("time") if len(time_options) > 1 else time_options[0].alias("time")
 
@@ -788,7 +788,7 @@ def transform_to_meds_unsorted(
             elif "source_value" in code_mappings:
                 actual_mapping_choice = "source_value"
             else:
-                raise ValueError(f"No code mappings defined for table")
+                raise ValueError("No code mappings defined for table")
         else:
             # CLI requested a specific mapping that doesn't exist for this table
             # Try to fall back intelligently
@@ -839,7 +839,7 @@ def transform_to_meds_unsorted(
             base_exprs.append(pl.col(code_field).cast(pl.Utf8).alias("code"))
 
         else:
-            raise ValueError(f"source_value mapping must have either 'field' or 'template'")
+            raise ValueError("source_value mapping must have either 'field' or 'template'")
 
     elif actual_mapping_choice == "concept_id":
         # Concept ID mapping - can use 'template' OR field-based concept lookup
@@ -881,19 +881,19 @@ def transform_to_meds_unsorted(
                 if fallback_concept_id is not None:
                     # Use fallback as literal concept_id, will be joined to get code
                     if concept_df is None or len(concept_df) == 0:
-                        raise ValueError(f"fallback_concept_id specified but concept_df not provided")
+                        raise ValueError("fallback_concept_id specified but concept_df not provided")
 
                     needs_concept_join = True
                     base_exprs.append(pl.lit(fallback_concept_id).cast(pl.Int64).alias("concept_id"))
                 else:
                     raise ValueError(
-                        f"concept_id mapping requested but no concept_id_field, "
-                        f"source_concept_id_field, fallback_concept_id, or template defined"
+                        "concept_id mapping requested but no concept_id_field, "
+                        "source_concept_id_field, fallback_concept_id, or template defined"
                     )
             else:
                 # Standard concept_id mapping with fields
                 if concept_df is None or len(concept_df) == 0:
-                    raise ValueError(f"concept_id mapping requested but concept_df not provided")
+                    raise ValueError("concept_id mapping requested but concept_df not provided")
 
                 needs_concept_join = True
 
@@ -1181,11 +1181,11 @@ def partition_to_sorted_runs(
         low_memory: Use Polars low_memory mode for smaller batches
         num_workers: Number of parallel workers for processing files
     """
-    print(f"\n[Stage 2.1] Creating sorted runs (optimized + parallel)...")
+    print("\n[Stage 2.1] Creating sorted runs (optimized + parallel)...")
     print(f"  Shards: {num_shards}")
     print(f"  Workers: {num_workers}")
     print(f"  Chunk size: {chunk_rows:,} rows")
-    print(f"  Strategy: Read-once partitioning")
+    print("  Strategy: Read-once partitioning")
 
     runs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1198,7 +1198,7 @@ def partition_to_sorted_runs(
     unsorted_files = sorted(unsorted_dir.glob("*.parquet"))
 
     if not unsorted_files:
-        print(f"  WARNING: No unsorted files found")
+        print("  WARNING: No unsorted files found")
         return
 
     print(f"  Unsorted files: {len(unsorted_files)}")
@@ -1236,12 +1236,12 @@ def partition_to_sorted_runs(
             total_run_counts[shard_id] += run_counts[shard_id]
 
     # Always show run statistics (useful for debugging)
-    print(f"\n  ✓ Partitioning complete")
+    print("\n  ✓ Partitioning complete")
     print(f"  Total runs created: {sum(total_run_counts)}")
     print(f"  Runs per shard (avg): {sum(total_run_counts) / num_shards:.1f}")
 
     if verbose:
-        print(f"\n  Detailed runs per shard:")
+        print("\n  Detailed runs per shard:")
         for shard_id, count in enumerate(total_run_counts):
             print(f"    Shard {shard_id:3d}: {count:4d} runs")
 
@@ -1351,7 +1351,7 @@ def streaming_external_sort(
         row_group_size: Rows per Parquet row group (smaller = less memory)
         num_workers: Number of parallel workers for Stage 2.1 partitioning
     """
-    print(f"\n" + "=" * 70)
+    print("\n" + "=" * 70)
     print("STAGE 2: STREAMING EXTERNAL SORT")
     print("=" * 70)
 
@@ -1379,7 +1379,7 @@ def streaming_external_sort(
         # Check if runs exist
         if not runs_dir.exists():
             print(f"ERROR: No runs found at {runs_dir}")
-            print(f"  Run with --pipeline partition first!")
+            print("  Run with --pipeline partition first!")
             sys.exit(1)
 
     # Stage 2.2: Streaming merge per shard
@@ -1406,7 +1406,7 @@ def streaming_external_sort(
         # Sequential vs Parallel
         if num_merge_workers == 1:
             # Sequential merge (low memory)
-            print(f"\n[Stage 2.2] Streaming merge (sequential)...")
+            print("\n[Stage 2.2] Streaming merge (sequential)...")
             row_counts = []
             for task in tqdm(merge_tasks, desc="Merging shards"):
                 rows = _merge_shard_worker(task)
@@ -1433,7 +1433,7 @@ def streaming_external_sort(
 
     stage2_elapsed = time.time() - stage2_start
 
-    print(f"\n" + "=" * 70)
+    print("\n" + "=" * 70)
     print("STAGE 2 COMPLETE: STREAMING SORT")
     print("=" * 70)
     print(f"Total rows:    {total_rows:,}")
@@ -1445,7 +1445,7 @@ def streaming_external_sort(
 
     # Per-shard breakdown
     if verbose:
-        print(f"\nPer-shard breakdown:")
+        print("\nPer-shard breakdown:")
         for shard_id in range(num_shards):
             output_file = final_dir / f"{shard_id}.parquet"
             if output_file.exists():
@@ -1545,7 +1545,7 @@ def run_omop_to_meds_streaming(
         # Default: single-threaded per worker for multiprocessing
         os.environ["POLARS_MAX_THREADS"] = "1"
         if verbose:
-            print(f"Set POLARS_MAX_THREADS=1 (default for multiprocessing)")
+            print("Set POLARS_MAX_THREADS=1 (default for multiprocessing)")
 
     # Configure Rayon threading (used by Polars internally)
     if rayon_threads is not None:
@@ -1556,7 +1556,7 @@ def run_omop_to_meds_streaming(
         # Default: single-threaded per worker
         os.environ["RAYON_NUM_THREADS"] = "1"
         if verbose:
-            print(f"Set RAYON_NUM_THREADS=1 (default for multiprocessing)")
+            print("Set RAYON_NUM_THREADS=1 (default for multiprocessing)")
 
     # ========================================================================
     # PARSE PIPELINE STAGES
@@ -1603,17 +1603,17 @@ def run_omop_to_meds_streaming(
 
         if has_etl_output:
             if force_refresh:
-                print(f"\n🔄 Force refresh enabled - removing existing output directory...")
+                print("\n🔄 Force refresh enabled - removing existing output directory...")
                 shutil.rmtree(output_dir)
                 print(f"   ✓ Removed: {output_dir}")
                 output_dir.mkdir(parents=True, exist_ok=True)
             else:
-                print(f"\n❌ ERROR: Output directory already exists and contains ETL data!")
+                print("\n❌ ERROR: Output directory already exists and contains ETL data!")
                 print(f"   Directory: {output_dir}")
                 print(f"   Found: {[d.name for d in output_dir.iterdir() if d.is_dir()]}")
-                print(f"\n   Options:")
-                print(f"   1. Use --force-refresh to overwrite existing data")
-                print(f"   2. Choose a different output directory")
+                print("\n   Options:")
+                print("   1. Use --force-refresh to overwrite existing data")
+                print("   2. Choose a different output directory")
                 print(f"   3. Manually delete the directory: rm -rf {output_dir}")
                 sys.exit(1)
 
@@ -1625,13 +1625,15 @@ def run_omop_to_meds_streaming(
     print(f"Pipeline stages: {', '.join(sorted(stages_to_run))}")
     print(f"Run compression: {run_compression}")
     print(f"Final compression: {final_compression}")
-    print(f"Using Polars 1.x streaming for Stage 2")
+    print("Using Polars 1.x streaming for Stage 2")
+
+    import multiprocessing as mp
 
     import meds
-    import meds_etl
     import pyarrow as pa
     import pyarrow.parquet as pq
-    import multiprocessing as mp
+
+    import meds_etl
 
     primary_key = config.get("primary_key", "person_id")
 
@@ -1664,7 +1666,7 @@ def run_omop_to_meds_streaming(
         concept_df, code_metadata = build_concept_map(omop_dir, verbose=verbose)
 
         if len(concept_df) == 0:
-            print(f"\nERROR: concept_id mapping requested but concept table not found!")
+            print("\nERROR: concept_id mapping requested but concept table not found!")
             sys.exit(1)
 
         print(f"  Loaded {len(concept_df):,} concepts")
@@ -1674,9 +1676,9 @@ def run_omop_to_meds_streaming(
             original_size = len(concept_df)
 
             if verbose:
-                print(f"\nOptimizing concept map (pre-scanning data to find used concepts)...")
+                print("\nOptimizing concept map (pre-scanning data to find used concepts)...")
                 print(f"  Using {num_workers} workers to scan OMOP files")
-                print(f"  (If this hangs on Linux, ensure --process_method spawn is set)")
+                print("  (If this hangs on Linux, ensure --process_method spawn is set)")
 
             used_concept_ids = prescan_concept_ids(omop_dir, config, num_workers, verbose=verbose)
 
@@ -1809,7 +1811,7 @@ def run_omop_to_meds_streaming(
         print(f"Time:             {stage1_elapsed:.2f}s")
 
         # Detailed breakdown by table
-        print(f"\nPer-table breakdown:")
+        print("\nPer-table breakdown:")
         by_table = {}
         for r in successes:
             table = r.get("table", "unknown")
@@ -1863,7 +1865,7 @@ def run_omop_to_meds_streaming(
         # Check if unsorted data exists
         if not unsorted_dir.exists() or not list(unsorted_dir.glob("*.parquet")):
             print(f"ERROR: No unsorted data found at {unsorted_dir}")
-            print(f"  Run with --pipeline transform first!")
+            print("  Run with --pipeline transform first!")
             sys.exit(1)
 
     # ========================================================================
@@ -1901,7 +1903,7 @@ def run_omop_to_meds_streaming(
         print("\nSkipping Stage 2 (sort)")
 
     # Cleanup temp
-    print(f"\nCleaning up temporary directory...")
+    print("\nCleaning up temporary directory...")
     shutil.rmtree(temp_dir)
     print(f"  ✓ Removed: {temp_dir}")
 

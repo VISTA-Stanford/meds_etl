@@ -48,7 +48,7 @@ def split_list(ls: List[Any], parts: int) -> List[List[Any]]:
     return result
 
 
-def get_table_files(path_to_src_omop_dir: str, table_name: str, table_details={}) -> Tuple[List[str], List[str]]:
+def get_table_files(path_to_src_omop_dir: str, table_name: str, table_details=None) -> Tuple[List[str], List[str]]:
     """Retrieve all .csv/.csv.gz/.parquet files for the OMOP table given by `table_name` in `path_to_src_omop_dir`
 
     Because OMOP tables can be quite large for datasets comprising millions
@@ -61,6 +61,9 @@ def get_table_files(path_to_src_omop_dir: str, table_name: str, table_details={}
 
     The first list contains all the csv files. The second list contains all parquet files.
     """
+    if table_details is None:
+        table_details = {}
+
     if table_details.get("file_suffix"):
         table_name += "_" + table_details["file_suffix"]
 
@@ -432,7 +435,7 @@ def process_table_csv(args):
 
             write_event_data(
                 path_to_MEDS_unsorted_dir,
-                lambda: batch.lazy(),
+                lambda batch=batch: batch,
                 table_name,
                 all_table_details,
                 concept_id_map,
@@ -519,8 +522,8 @@ def extract_metadata(path_to_src_omop_dir: str, path_to_decompressed_dir: str, v
 
             # Update our running dictionary with the concepts we read in from
             # the concept table shard
-            concept_id_map |= dict(zip(result["concept_id"], result["code"]))
-            concept_name_map |= dict(zip(result["concept_id"], result["name"]))
+            concept_id_map |= dict(zip(result["concept_id"], result["code"], strict=False))
+            concept_name_map |= dict(zip(result["concept_id"], result["name"], strict=False))
 
             # Assuming custom concepts have concept_id > 2000000000 we create a
             # record for them in `code_metadata` with no parent codes. Such a
@@ -564,7 +567,7 @@ def extract_metadata(path_to_src_omop_dir: str, path_to_decompressed_dir: str, v
             )
 
             for concept_id_1, concept_id_2 in zip(
-                custom_relationships["concept_id_1"], custom_relationships["concept_id_2"]
+                custom_relationships["concept_id_1"], custom_relationships["concept_id_2"], strict=False
             ):
                 if concept_id_1 in concept_id_map and concept_id_2 in concept_id_map:
                     code_metadata[concept_id_map[concept_id_1]]["parent_codes"].append(concept_id_map[concept_id_2])
@@ -639,7 +642,11 @@ def main():
         help="If set, the job continues from a previous run, starting after the "
         "conversion to MEDS Unsorted but before converting from MEDS Unsorted to MEDS.",
     )
-    parser.add_argument("--force_refresh", action="store_true", help="If set, this will overwrite all previous MEDS data in the output dir.")
+    parser.add_argument(
+        "--force_refresh",
+        action="store_true",
+        help="If set, this will overwrite all previous MEDS data in the output dir.",
+    )
     parser.add_argument("--omop_version", type=str, help="Switch between OMOP 5.3/5.4, default 5.4.")
     args = parser.parse_args()
 
@@ -737,7 +744,9 @@ def main():
             "visit": [
                 {"fallback_concept_id": DEFAULT_VISIT_CONCEPT_ID, "file_suffix": "occurrence"},
                 {
-                    "concept_id_field": "discharged_to_concept_id" if omop_version == "5.4" else "discharge_to_concept_id",
+                    "concept_id_field": (
+                        "discharged_to_concept_id" if omop_version == "5.4" else "discharge_to_concept_id"
+                    ),
                     "time_field_options": ["visit_end_datetime", "visit_end_date"],
                     "file_suffix": "occurrence",
                 },

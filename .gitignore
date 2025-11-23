@@ -1,6 +1,9 @@
 _version.py
 uv.lock
 
+# Pre-commit
+.pre-commit-cache/
+
 # macOS system files
 .DS_Store
 .AppleDouble
