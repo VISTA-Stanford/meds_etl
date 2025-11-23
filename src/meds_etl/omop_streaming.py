@@ -1925,7 +1925,8 @@ def run_omop_to_meds_streaming(
 # ============================================================================
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for meds_etl_omop_streaming command."""
     import argparse
 
     parser = argparse.ArgumentParser(description="OMOP to MEDS ETL with Polars Streaming")
@@ -2028,3 +2029,7 @@ if __name__ == "__main__":
         process_method=args.process_method,
         force_refresh=args.force_refresh,
     )
+
+
+if __name__ == "__main__":
+    main()
