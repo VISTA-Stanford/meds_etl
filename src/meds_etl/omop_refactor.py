@@ -539,6 +539,7 @@ def prescan_concept_ids(
     num_workers: int,
     verbose: bool = False,
     timeout_per_worker: int = 600,  # 10 minutes per worker
+    process_method: str = "spawn",  # Multiprocessing start method
 ) -> Set[int]:
     """
     Fast parallel pre-scan to collect all unique concept_ids used in OMOP data.
@@ -605,7 +606,7 @@ def prescan_concept_ids(
     total_errors = []
 
     try:
-        with mp.Pool(processes=num_workers) as pool:
+        with mp.get_context(process_method).Pool(processes=num_workers) as pool:
             # Use map_async for timeout support
             async_result = pool.map_async(prescan_worker, worker_args)
 
@@ -1159,6 +1160,7 @@ def parallel_shard_sort(
     output_dir: Path,
     num_shards: int,
     num_workers: int,
+    process_method: str = "spawn",
     verbose: bool = False,
 ) -> None:
     """
@@ -1200,7 +1202,7 @@ def parallel_shard_sort(
 
     # Process shards in parallel
     if num_workers > 1:
-        with mp.Pool(processes=num_workers) as pool:
+        with mp.get_context(process_method).Pool(processes=num_workers) as pool:
             results = list(
                 tqdm(pool.imap_unordered(process_single_shard, tasks), total=num_shards, desc="Processing shards")
             )
@@ -1357,20 +1359,12 @@ def run_omop_to_meds_etl(
     - --parallel-shards: N workers, each processes one shard at a time (moderate memory)
     - --low-memory: 1 worker, sequential processing (minimal memory)
     """
-    # Set multiprocessing start method FIRST (critical for Linux stability)
-    import multiprocessing as mp
+    # NOTE: We DON'T set the global multiprocessing method here like omop_streaming.py does
+    # because the cpp backend has its own internal multiprocessing that conflicts with it.
+    # Instead, we use get_context("spawn") when creating pools in Python code.
+    # The process_method parameter is only used for Python multiprocessing paths.
 
-    try:
-        mp.set_start_method(process_method, force=True)
-        if verbose:
-            print(f"Multiprocessing method: '{process_method}' (critical for Linux stability)")
-    except RuntimeError:
-        # Already set - check if it matches
-        current_method = mp.get_start_method()
-        if current_method != process_method and verbose:
-            print(f"Warning: multiprocessing method already set to '{current_method}' (requested '{process_method}')")
-        elif verbose:
-            print(f"Multiprocessing method: '{current_method}' (already set)")
+    import multiprocessing as mp
 
     print("\n" + "=" * 70)
     print("OMOP → MEDS ETL PIPELINE (REFACTORED)")
@@ -1460,7 +1454,9 @@ def run_omop_to_meds_etl(
                 original_size = len(concept_df)
 
                 # Pre-scan to find which concept_ids are actually used
-                used_concept_ids = prescan_concept_ids(omop_dir, config, num_workers, verbose=verbose)
+                used_concept_ids = prescan_concept_ids(
+                    omop_dir, config, num_workers, verbose=verbose, process_method=process_method
+                )
 
                 if used_concept_ids:
                     # Filter concept DataFrame to only used concepts
@@ -1584,7 +1580,7 @@ def run_omop_to_meds_etl(
 
     if num_workers > 1:
         os.environ["POLARS_MAX_THREADS"] = "1"
-        with mp.Pool(processes=num_workers) as pool:
+        with mp.get_context(process_method).Pool(processes=num_workers) as pool:
             results = list(
                 tqdm(
                     pool.imap_unordered(process_omop_file_worker, tasks),
@@ -1699,7 +1695,7 @@ def run_omop_to_meds_etl(
     elif parallel_shards:
         # Parallel shard mode (each worker processes one shard at a time)
         print(f"\n🔧 Parallel shard mode enabled")
-        parallel_shard_sort(unsorted_dir, output_dir, num_shards, num_workers, verbose=verbose)
+        parallel_shard_sort(unsorted_dir, output_dir, num_shards, num_workers, process_method, verbose=verbose)
 
     else:
         # Standard mode: use meds_etl.unsorted.sort() which handles both backends
