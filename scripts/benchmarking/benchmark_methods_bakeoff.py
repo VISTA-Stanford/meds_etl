@@ -255,7 +255,7 @@ def main():
         cmd = [
             sys.executable,
             "-m",
-            "meds_etl.omop_refactor_streaming",
+            "meds_etl.omop_streaming",
             "--omop_dir",
             args.omop_dir,
             "--output_dir",

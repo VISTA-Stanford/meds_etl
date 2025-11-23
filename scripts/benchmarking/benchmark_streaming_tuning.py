@@ -75,7 +75,7 @@ def run_streaming_experiment(omop_dir, output_dir, config, params, logger, exper
     cmd = [
         sys.executable,
         "-m",
-        "meds_etl.omop_refactor_streaming",
+        "meds_etl.omop_streaming",
         "--omop_dir",
         omop_dir,
         "--output_dir",

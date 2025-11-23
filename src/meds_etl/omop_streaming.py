@@ -446,6 +446,7 @@ def validate_parquet_file(file_path: Path) -> bool:
     try:
         # Try to read just the schema (fast)
         import pyarrow.parquet as pq
+
         pq.read_schema(file_path)
         return True
     except Exception:
@@ -666,7 +667,7 @@ def find_omop_table_files(omop_dir: Path, table_name: str) -> List[Path]:
 def apply_transforms(expr: pl.Expr, transforms: list) -> pl.Expr:
     """
     Apply a list of transformations to a Polars expression.
-    
+
     Supported transforms:
     - {"type": "replace", "pattern": "X", "replacement": "Y"} - Replace substring
     - {"type": "regex_replace", "pattern": "X", "replacement": "Y"} - Regex replace
@@ -674,50 +675,50 @@ def apply_transforms(expr: pl.Expr, transforms: list) -> pl.Expr:
     - {"type": "upper"} - Convert to uppercase
     - {"type": "strip"} - Strip whitespace
     - {"type": "strip_chars", "characters": "X"} - Strip specific characters
-    
+
     Args:
         expr: Polars expression to transform
         transforms: List of transform dictionaries
-        
+
     Returns:
         Transformed Polars expression
     """
     for transform in transforms:
         transform_type = transform.get("type")
-        
+
         if transform_type == "replace":
             # Simple string replacement
             pattern = transform.get("pattern", "")
             replacement = transform.get("replacement", "")
             expr = expr.str.replace_all(pattern, replacement, literal=True)
-            
+
         elif transform_type == "regex_replace":
             # Regex replacement
             pattern = transform.get("pattern", "")
             replacement = transform.get("replacement", "")
             expr = expr.str.replace_all(pattern, replacement, literal=False)
-            
+
         elif transform_type == "lower":
             # Convert to lowercase
             expr = expr.str.to_lowercase()
-            
+
         elif transform_type == "upper":
             # Convert to uppercase
             expr = expr.str.to_uppercase()
-            
+
         elif transform_type == "strip":
             # Strip leading/trailing whitespace
             expr = expr.str.strip_chars()
-            
+
         elif transform_type == "strip_chars":
             # Strip specific characters
             characters = transform.get("characters", "")
             expr = expr.str.strip_chars(characters)
-            
+
         else:
             # Unknown transform type - skip
             pass
-    
+
     return expr
 
 
@@ -825,11 +826,11 @@ def transform_to_meds_unsorted(
 
             # Build initial code expression
             code_expr = pl.concat_str(exprs)
-            
+
             # Apply transforms if specified
             transforms = source_value_config.get("transforms", [])
             code_expr = apply_transforms(code_expr, transforms)
-            
+
             base_exprs.append(code_expr.alias("code"))
 
         elif "field" in source_value_config:
@@ -861,11 +862,11 @@ def transform_to_meds_unsorted(
 
             # Build initial code expression
             code_expr = pl.concat_str(exprs)
-            
+
             # Apply transforms if specified
             transforms = concept_config.get("transforms", [])
             code_expr = apply_transforms(code_expr, transforms)
-            
+
             base_exprs.append(code_expr.alias("code"))
 
         else:
@@ -1097,13 +1098,13 @@ def process_omop_file_worker(args: Tuple) -> Dict:
 def _partition_file_worker(args):
     """
     Worker function to partition a single unsorted file into sorted runs.
-    
+
     Returns a list of run counts per shard.
     """
     file_idx, unsorted_file, runs_dir, num_shards, chunk_rows, compression, verbose, low_memory = args
-    
+
     run_counts = [0] * num_shards
-    
+
     try:
         # Read file (only once!) with low_memory flag
         df = pl.read_parquet(unsorted_file, low_memory=low_memory)
@@ -1141,10 +1142,10 @@ def _partition_file_worker(args):
                 sorted_chunk.write_parquet(run_file, compression=compression)
 
                 run_counts[shard_id] += 1
-            
+
             # Cleanup shard data
             del shard_data
-        
+
         # Cleanup file data and force garbage collection
         del df
         gc.collect()
@@ -1152,7 +1153,7 @@ def _partition_file_worker(args):
     except Exception as e:
         if verbose:
             print(f"\n  WARNING: Error processing {unsorted_file.name}: {e}")
-    
+
     return run_counts
 
 
@@ -1175,7 +1176,7 @@ def partition_to_sorted_runs(
     - For each shard: filter, sort, write run
 
     This is much faster than reading each file N times (once per shard).
-    
+
     Args:
         low_memory: Use Polars low_memory mode for smaller batches
         num_workers: Number of parallel workers for processing files
@@ -1218,6 +1219,7 @@ def partition_to_sorted_runs(
     else:
         # Parallel processing
         import multiprocessing as mp
+
         with mp.Pool(processes=num_workers) as pool:
             all_run_counts = list(
                 tqdm(
@@ -1262,7 +1264,7 @@ def streaming_merge_shard(
     - Sink to output (streaming write)
 
     This is memory-bounded and efficient (native Rust implementation).
-    
+
     Args:
         low_memory: Use Polars low_memory mode for smaller batches
         row_group_size: Rows per row group in output Parquet (smaller = less memory)
@@ -1281,8 +1283,8 @@ def streaming_merge_shard(
         pl.concat(scans, how="vertical")
         .sort(["subject_id", "time"])
         .sink_parquet(
-            str(output_file), 
-            compression=compression, 
+            str(output_file),
+            compression=compression,
             maintain_order=True,  # Important for sorted output
             row_group_size=row_group_size,  # Control memory usage
         )
@@ -1290,7 +1292,7 @@ def streaming_merge_shard(
 
     # Get row count
     row_count = pl.scan_parquet(output_file).select(pl.len()).collect().item()
-    
+
     # Force garbage collection
     gc.collect()
 
@@ -1303,19 +1305,19 @@ def _merge_shard_worker(args):
     Must be at module level to be picklable by multiprocessing.
     """
     shard_dir, output_file, compression, low_memory, row_group_size = args
-    
+
     rows = streaming_merge_shard(
-        shard_dir, 
-        output_file, 
-        compression=compression, 
+        shard_dir,
+        output_file,
+        compression=compression,
         verbose=False,
         low_memory=low_memory,
         row_group_size=row_group_size,
     )
-    
+
     # Explicit cleanup
     gc.collect()
-    
+
     return rows
 
 
@@ -1479,6 +1481,7 @@ def run_omop_to_meds_streaming(
     polars_threads: Optional[int] = None,
     rayon_threads: Optional[int] = None,
     process_method: str = "spawn",
+    force_refresh: bool = False,
 ):
     """
     Run OMOP to MEDS ETL with streaming external sort.
@@ -1495,9 +1498,9 @@ def run_omop_to_meds_streaming(
             - "partition": Only partition to sorted runs (Stage 2.1)
             - "merge": Only merge runs (Stage 2.2)
             - "sort": Run both partition + merge (Stage 2)
-        
+
         Memory Configuration:
-            low_memory: Use Polars low_memory mode (smaller batches, less RAM). 
+            low_memory: Use Polars low_memory mode (smaller batches, less RAM).
                        Default False. Enable with --low_memory for 32-64GB laptops.
             row_group_size: Rows per Parquet row group. Smaller = less memory.
                            Default 100k (good for 32-64GB laptops).
@@ -1505,7 +1508,7 @@ def run_omop_to_meds_streaming(
                            Overrides POLARS_MAX_THREADS env var.
             rayon_threads: Max threads for Rayon (None = use env var, 1 = single-threaded).
                           Overrides RAYON_NUM_THREADS env var.
-            process_method: Multiprocessing start method ('spawn' or 'fork'). 
+            process_method: Multiprocessing start method ('spawn' or 'fork').
                            Default 'spawn' for better memory isolation.
                            'fork' is faster but can cause memory bloat.
                            CRITICAL: Must be set early to prevent deadlocks on Linux.
@@ -1517,9 +1520,9 @@ def run_omop_to_meds_streaming(
     # including prescan_concept_ids() which creates its own pool.
     # On Linux, default 'fork' + Polars threads = deadlock.
     # On Mac, default is already 'spawn' so this prevents Linux hangs.
-    
+
     import multiprocessing as mp
-    
+
     # Set multiprocessing start method FIRST
     try:
         mp.set_start_method(process_method, force=True)
@@ -1532,7 +1535,7 @@ def run_omop_to_meds_streaming(
             print(f"Warning: multiprocessing method already set to '{current_method}' (requested '{process_method}')")
         elif verbose:
             print(f"Multiprocessing method: '{current_method}' (already set)")
-    
+
     # Configure Polars threading (CLI args override environment variables)
     if polars_threads is not None:
         os.environ["POLARS_MAX_THREADS"] = str(polars_threads)
@@ -1543,7 +1546,7 @@ def run_omop_to_meds_streaming(
         os.environ["POLARS_MAX_THREADS"] = "1"
         if verbose:
             print(f"Set POLARS_MAX_THREADS=1 (default for multiprocessing)")
-    
+
     # Configure Rayon threading (used by Polars internally)
     if rayon_threads is not None:
         os.environ["RAYON_NUM_THREADS"] = str(rayon_threads)
@@ -1554,11 +1557,11 @@ def run_omop_to_meds_streaming(
         os.environ["RAYON_NUM_THREADS"] = "1"
         if verbose:
             print(f"Set RAYON_NUM_THREADS=1 (default for multiprocessing)")
-    
+
     # ========================================================================
     # PARSE PIPELINE STAGES
     # ========================================================================
-    
+
     # Parse pipeline stages
     stages_to_run = set()
     if pipeline_stages == "all":
@@ -1586,6 +1589,33 @@ def run_omop_to_meds_streaming(
     output_dir = Path(output_dir)
     temp_dir = output_dir / "temp"
     unsorted_dir = temp_dir / "unsorted_data"
+
+    # Handle existing output directory
+    if output_dir.exists():
+        # Check if this looks like a previous ETL output (has data/ or metadata/ or temp/)
+        has_etl_output = any(
+            [
+                (output_dir / "data").exists(),
+                (output_dir / "metadata").exists(),
+                (output_dir / "temp").exists(),
+            ]
+        )
+
+        if has_etl_output:
+            if force_refresh:
+                print(f"\n🔄 Force refresh enabled - removing existing output directory...")
+                shutil.rmtree(output_dir)
+                print(f"   ✓ Removed: {output_dir}")
+                output_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                print(f"\n❌ ERROR: Output directory already exists and contains ETL data!")
+                print(f"   Directory: {output_dir}")
+                print(f"   Found: {[d.name for d in output_dir.iterdir() if d.is_dir()]}")
+                print(f"\n   Options:")
+                print(f"   1. Use --force-refresh to overwrite existing data")
+                print(f"   2. Choose a different output directory")
+                print(f"   3. Manually delete the directory: rm -rf {output_dir}")
+                sys.exit(1)
 
     # Run Stage 1 using original implementation
     # This creates unsorted MEDS files
@@ -1642,12 +1672,12 @@ def run_omop_to_meds_streaming(
         # Optimize if requested
         if optimize_concepts:
             original_size = len(concept_df)
-            
+
             if verbose:
                 print(f"\nOptimizing concept map (pre-scanning data to find used concepts)...")
                 print(f"  Using {num_workers} workers to scan OMOP files")
                 print(f"  (If this hangs on Linux, ensure --process_method spawn is set)")
-            
+
             used_concept_ids = prescan_concept_ids(omop_dir, config, num_workers, verbose=verbose)
 
             if used_concept_ids:
@@ -1805,11 +1835,11 @@ def run_omop_to_meds_streaming(
         for table, stats in sorted(by_table.items(), key=lambda x: x[1]["input"], reverse=True):
             retention = 100 * stats["output"] / stats["input"] if stats["input"] > 0 else 0
             mapping_used = stats["code_mapping_used"]
-            
+
             # Simplify display: if using template, just show "template" regardless of base strategy
             if "+template" in mapping_used:
                 mapping_used = "template"
-            
+
             print(
                 f"   {table:30s} [{mapping_used:20s}] {stats['files']:4d} files  "
                 f"{stats['input']:>13,} -> {stats['output']:>13,} rows ({retention:5.1f}%)"
@@ -1931,10 +1961,11 @@ if __name__ == "__main__":
         default=0,
         help="Merge workers (0=auto/half cores, 1=sequential/low memory, N=parallel)",
     )
-    
+
     # Memory configuration arguments
-    memory_group = parser.add_argument_group("Memory Configuration", 
-                                              "Control memory usage and profiling (important for laptops)")
+    memory_group = parser.add_argument_group(
+        "Memory Configuration", "Control memory usage and profiling (important for laptops)"
+    )
     memory_group.add_argument(
         "--low_memory",
         action="store_true",
@@ -1964,9 +1995,14 @@ if __name__ == "__main__":
         default="spawn",
         help="Multiprocessing start method. 'spawn' = better memory isolation (default), 'fork' = faster startup",
     )
-    
+
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--no-optimize-concepts", dest="optimize_concepts", action="store_false")
+    parser.add_argument(
+        "--force-refresh",
+        action="store_true",
+        help="Force refresh: delete existing output directory if it exists (default: error if output exists)",
+    )
 
     args = parser.parse_args()
 
@@ -1990,4 +2026,5 @@ if __name__ == "__main__":
         polars_threads=args.polars_threads,
         rayon_threads=args.rayon_threads,
         process_method=args.process_method,
+        force_refresh=args.force_refresh,
     )

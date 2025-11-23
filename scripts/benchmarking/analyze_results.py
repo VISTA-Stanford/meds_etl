@@ -448,7 +448,7 @@ def generate_performance_report(all_results, output_dir):
             
             f.write("Based on benchmark results, the recommended configuration is:\n\n")
             f.write("```bash\n")
-            f.write("python -m meds_etl.omop_refactor_streaming \\\n")
+            f.write("python -m meds_etl.omop_streaming \\\n")
             f.write("  --omop_dir INPUT_DIR \\\n")
             f.write("  --output_dir OUTPUT_DIR \\\n")
             f.write("  --config CONFIG.json \\\n")
