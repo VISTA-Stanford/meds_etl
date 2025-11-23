@@ -1,4 +1,3 @@
-
 """
 Refactored OMOP to MEDS ETL pipeline.
 
@@ -672,7 +671,7 @@ def find_omop_table_files(omop_dir: Path, table_name: str) -> List[Path]:
 def apply_transforms(expr: pl.Expr, transforms: list) -> pl.Expr:
     """
     Apply a list of transformations to a Polars expression.
-    
+
     Supported transforms:
     - {"type": "replace", "pattern": "X", "replacement": "Y"} - Replace substring
     - {"type": "regex_replace", "pattern": "X", "replacement": "Y"} - Regex replace
@@ -680,50 +679,50 @@ def apply_transforms(expr: pl.Expr, transforms: list) -> pl.Expr:
     - {"type": "upper"} - Convert to uppercase
     - {"type": "strip"} - Strip whitespace
     - {"type": "strip_chars", "characters": "X"} - Strip specific characters
-    
+
     Args:
         expr: Polars expression to transform
         transforms: List of transform dictionaries
-        
+
     Returns:
         Transformed Polars expression
     """
     for transform in transforms:
         transform_type = transform.get("type")
-        
+
         if transform_type == "replace":
             # Simple string replacement
             pattern = transform.get("pattern", "")
             replacement = transform.get("replacement", "")
             expr = expr.str.replace_all(pattern, replacement, literal=True)
-            
+
         elif transform_type == "regex_replace":
             # Regex replacement
             pattern = transform.get("pattern", "")
             replacement = transform.get("replacement", "")
             expr = expr.str.replace_all(pattern, replacement, literal=False)
-            
+
         elif transform_type == "lower":
             # Convert to lowercase
             expr = expr.str.to_lowercase()
-            
+
         elif transform_type == "upper":
             # Convert to uppercase
             expr = expr.str.to_uppercase()
-            
+
         elif transform_type == "strip":
             # Strip leading/trailing whitespace
             expr = expr.str.strip_chars()
-            
+
         elif transform_type == "strip_chars":
             # Strip specific characters
             characters = transform.get("characters", "")
             expr = expr.str.strip_chars(characters)
-            
+
         else:
             # Unknown transform type - skip
             pass
-    
+
     return expr
 
 
@@ -832,11 +831,11 @@ def transform_to_meds_unsorted(
 
             # Build initial code expression
             code_expr = pl.concat_str(exprs)
-            
+
             # Apply transforms if specified
             transforms = source_value_config.get("transforms", [])
             code_expr = apply_transforms(code_expr, transforms)
-            
+
             base_exprs.append(code_expr.alias("code"))
 
         elif "field" in source_value_config:
@@ -869,11 +868,11 @@ def transform_to_meds_unsorted(
 
             # Build initial code expression
             code_expr = pl.concat_str(exprs)
-            
+
             # Apply transforms if specified
             transforms = concept_config.get("transforms", [])
             code_expr = apply_transforms(code_expr, transforms)
-            
+
             base_exprs.append(code_expr.alias("code"))
 
         else:
@@ -1321,6 +1320,7 @@ def run_omop_to_meds_etl(
     optimize_concepts: bool = True,
     low_memory: bool = False,
     parallel_shards: bool = False,
+    process_method: str = "spawn",
 ):
     """
     Run OMOP to MEDS ETL pipeline.
@@ -1348,12 +1348,28 @@ def run_omop_to_meds_etl(
         backend: Backend for Stage 2 sort: 'auto' (try cpp, fallback polars), 'cpp', 'polars'
         low_memory: If True, use sequential shard processing (slowest, minimal memory)
         parallel_shards: If True, use parallel shard processing (each worker processes one shard)
+        process_method: Multiprocessing start method ('spawn' or 'fork'). Default 'spawn' for Linux stability.
 
     Sort options (Stage 2):
     - Default (backend='auto'): meds_etl_cpp if available, else unsorted.sort()
     - --parallel-shards: N workers, each processes one shard at a time (moderate memory)
     - --low-memory: 1 worker, sequential processing (minimal memory)
     """
+    # Set multiprocessing start method FIRST (critical for Linux stability)
+    import multiprocessing as mp
+
+    try:
+        mp.set_start_method(process_method, force=True)
+        if verbose:
+            print(f"Multiprocessing method: '{process_method}' (critical for Linux stability)")
+    except RuntimeError:
+        # Already set - check if it matches
+        current_method = mp.get_start_method()
+        if current_method != process_method and verbose:
+            print(f"Warning: multiprocessing method already set to '{current_method}' (requested '{process_method}')")
+        elif verbose:
+            print(f"Multiprocessing method: '{current_method}' (already set)")
+
     print("\n" + "=" * 70)
     print("OMOP → MEDS ETL PIPELINE (REFACTORED)")
     print("=" * 70)
@@ -1806,6 +1822,12 @@ def main():
         action="store_true",
         help="Use parallel shard processing (each worker processes one shard at a time - moderate memory, faster than --low-memory)",
     )
+    parser.add_argument(
+        "--process_method",
+        choices=["spawn", "fork"],
+        default="spawn",
+        help="Multiprocessing start method. 'spawn' = better memory isolation and Linux stability (default), 'fork' = faster startup but can cause issues on Linux",
+    )
 
     args = parser.parse_args()
 
@@ -1821,6 +1843,7 @@ def main():
         optimize_concepts=args.optimize_concepts,
         low_memory=args.low_memory,
         parallel_shards=args.parallel_shards,
+        process_method=args.process_method,
     )
 
 
