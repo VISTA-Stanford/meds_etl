@@ -1702,48 +1702,44 @@ def run_omop_to_meds_etl(
         parallel_shard_sort(unsorted_dir, output_dir, num_shards, num_workers, verbose=verbose)
 
     else:
-        # Standard mode: try C++ backend, fallback to Python
-        use_cpp = False
+        # Standard mode: use meds_etl.unsorted.sort() which handles both backends
+        # This is the same approach as omop.py uses
 
-        if backend in ["cpp", "auto"]:
+        # Check backend availability
+        if backend == "cpp":
             try:
                 import meds_etl_cpp
 
-                use_cpp = True
+                print(f"\n✅ Using meds_etl_cpp (C++) for external sort...")
+                print(f"   Memory-bounded, multi-threaded, optimized k-way merge")
             except ImportError:
-                if backend == "cpp":
-                    print(f"\n❌ ERROR: meds_etl_cpp not available but --backend cpp was specified")
-                    sys.exit(1)
-                elif backend == "auto":
-                    print(f"\n⚠️  meds_etl_cpp not available, using Python fallback...")
+                print(f"\n❌ ERROR: meds_etl_cpp not available but --backend cpp was specified")
+                sys.exit(1)
+        elif backend == "auto":
+            try:
+                import meds_etl_cpp
 
-        if use_cpp:
-            print(f"\n✅ Using meds_etl_cpp (C++) for external sort...")
-            print(f"   Memory-bounded, multi-threaded, optimized k-way merge")
-
-            import meds_etl_cpp
-
-            meds_etl_cpp.perform_etl(
-                str(temp_dir),  # Source: temp/ with metadata/ and unsorted_data/
-                str(output_dir / "result"),  # Target
-                num_shards,
-                num_workers,
-            )
-
-            print(f"   ✅ C++ external sort complete")
+                print(f"\n✅ Using meds_etl_cpp (C++) for external sort...")
+                print(f"   Memory-bounded, multi-threaded, optimized k-way merge")
+            except ImportError:
+                print(f"\n⚠️  meds_etl_cpp not available, using Python fallback...")
+                print(f"   Warning: Python sorting loads entire shards into memory!")
+                backend = "polars"
         else:
             print(f"\n⚠️  Using Python/Polars for sorting...")
             print(f"   Warning: Python sorting loads entire shards into memory!")
             print(f"   For large datasets, install meds_etl_cpp for memory-bounded sorting.")
 
-            # Python fallback (loads shards into memory - not ideal for large data)
-            meds_etl.unsorted.sort(
-                source_unsorted_path=str(temp_dir),
-                target_meds_path=str(output_dir / "result"),
-                num_shards=num_shards,
-                num_proc=num_workers,
-                backend="polars",
-            )
+        # Use the unified sort interface (same as omop.py)
+        meds_etl.unsorted.sort(
+            source_unsorted_path=str(temp_dir),
+            target_meds_path=str(output_dir / "result"),
+            num_shards=num_shards,
+            num_proc=num_workers,
+            backend=backend,
+        )
+
+        print(f"   ✅ External sort complete")
 
     # Move final data to output (applies to all backends)
     result_data_dir = output_dir / "result" / "data"
