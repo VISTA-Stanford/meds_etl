@@ -1671,6 +1671,17 @@ def run_omop_to_meds_etl(
     # STAGE 2: External sort (partition + sort via meds_etl_cpp or Python)
     # ========================================================================
 
+    # CRITICAL: Force cleanup of all multiprocessing resources from Stage 1
+    # before calling C++ backend. The C++ backend has its own multiprocessing
+    # and leftover semaphores from Python can cause conflicts/crashes.
+    import gc
+
+    gc.collect()  # Force garbage collection to clean up any lingering resources
+
+    # Clear POLARS_MAX_THREADS to allow C++ backend to use all threads
+    if "POLARS_MAX_THREADS" in os.environ:
+        del os.environ["POLARS_MAX_THREADS"]
+
     print("\n" + "=" * 70)
     print("STAGE 2: EXTERNAL SORT (partition + sort)")
     print("=" * 70)
