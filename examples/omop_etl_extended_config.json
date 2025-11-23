@@ -1,0 +1,286 @@
+{
+    "primary_key": "person_id",
+    "canonical_events": {
+        "birth": {
+            "table": "person",
+            "code": "MEDS_BIRTH",
+            "time_start": "birth_datetime"
+        },
+        "death": {
+            "table": "person",
+            "code": "MEDS_DEATH",
+            "time_start": "death_datetime"
+        },
+        "gender": {
+            "table": "person",
+            "concept_id": "gender_concept_id",
+            "static": true
+        },
+        "race": {
+            "table": "person",
+            "concept_id": "race_concept_id",
+            "static": true
+        },
+        "ethnicity": {
+            "table": "person",
+            "concept_id": "ethnicity_concept_id",
+            "static": true
+        }
+    },
+    "tables": {
+        "visit_occurrence": {
+            "subject_id_field": "person_id",
+            "time_start": "visit_start_datetime",
+            "time_end": "visit_end_datetime",
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "visit_concept_id"
+                }
+            },
+            "metadata": [
+                {
+                    "name": "visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "care_site_id",
+                    "type": "int"
+                },
+                {
+                    "name": "provider_id",
+                    "type": "int"
+                }
+            ]
+        },
+        "condition_occurrence": {
+            "subject_id_field": "person_id",
+            "time_start": "condition_start_datetime",
+            "time_end": "condition_end_datetime",
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "condition_concept_id"
+                }
+            },
+            "metadata": [
+                {
+                    "name": "condition_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_occurrence_id",
+                    "type": "int"
+                }
+            ]
+        },
+        "procedure_occurrence": {
+            "subject_id_field": "person_id",
+            "time_start": "procedure_datetime",
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "procedure_concept_id"
+                }
+            },
+            "metadata": [
+                {
+                    "name": "procedure_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_occurrence_id",
+                    "type": "int"
+                }
+            ]
+        },
+        "drug_exposure": {
+            "subject_id_field": "person_id",
+            "time_start": "drug_exposure_start_datetime",
+            "time_end": "drug_exposure_end_datetime",
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "drug_concept_id"
+                }
+            },
+            "numeric_value_field": "quantity",
+            "metadata": [
+                {
+                    "name": "drug_exposure_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_occurrence_id",
+                    "type": "int"
+                }
+            ]
+        },
+        "measurement": {
+            "subject_id_field": "person_id",
+            "time_start": "measurement_datetime",
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id"
+                }
+            },
+            "numeric_value_field": "value_as_number",
+            "metadata": [
+                {
+                    "name": "measurement_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "unit_concept_id",
+                    "type": "int"
+                }
+            ]
+        },
+        "observation": {
+            "subject_id_field": "person_id",
+            "time_start": "observation_datetime",
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "observation_concept_id"
+                }
+            },
+            "text_value_field": "value_as_string",
+            "metadata": [
+                {
+                    "name": "observation_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_occurrence_id",
+                    "type": "int"
+                }
+            ]
+        },
+        "note": {
+            "subject_id_field": "person_id",
+            "time_start": "note_datetime",
+            "code_mappings": {
+                "concept_id": {
+                    "template": "NOTE/{note_class_concept_id}",
+                    "transforms": [
+                        {
+                            "type": "upper"
+                        }
+                    ]
+                },
+                "note_title": {
+                    "template": "NOTE/{note_title}",
+                    "transforms": [
+                        {
+                            "type": "regex_replace",
+                            "pattern": "\\s+",
+                            "replacement": "-"
+                        },
+                        {
+                            "type": "upper"
+                        }
+                    ]
+                }
+            },
+            "text_value_field": "note_text",
+            "metadata": [
+                {
+                    "name": "note_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "note_class_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "note_type_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "encoding_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "language_concept_id",
+                    "type": "int"
+                }
+            ]
+        },
+        "image_occurrence": {
+            "subject_id_field": "person_id",
+            "time_start": "image_datetime",
+            "code_mappings": {
+                "concept_id": {
+                    "template": "IMAGE/{modality_concept_id}",
+                    "transforms": [
+                        {
+                            "type": "upper"
+                        }
+                    ]
+                },
+                "modality_anatomic": {
+                    "template": "IMAGE/{modality_source_value}|{anatomic_site_source_value}",
+                    "transforms": [
+                        {
+                            "type": "upper"
+                        }
+                    ]
+                }
+            },
+            "metadata": [
+                {
+                    "name": "image_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "modality_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "anatomic_site_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "image_type_concept_id",
+                    "type": "int"
+                }
+            ]
+        },
+        "specimen": {
+            "subject_id_field": "person_id",
+            "time_start": "specimen_datetime",
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "specimen_concept_id"
+                }
+            },
+            "numeric_value_field": "quantity",
+            "metadata": [
+                {
+                    "name": "specimen_id",
+                    "type": "int"
+                },
+                {
+                    "name": "specimen_type_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "anatomic_site_concept_id",
+                    "type": "int"
+                },
+                {
+                    "name": "disease_status_concept_id",
+                    "type": "int"
+                }
+            ]
+        }
+    }
+}
