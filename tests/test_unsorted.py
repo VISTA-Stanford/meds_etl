@@ -13,6 +13,7 @@ import jsonschema
 import meds
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 import meds_etl.unsorted
 
@@ -206,6 +207,7 @@ def test_shuffle_polars(tmp_path: pathlib.Path):
         assert comparison == data
 
 
+@pytest.mark.skipif(meds_etl_cpp is None, reason="meds_etl_cpp not available (not supported on macOS)")
 def test_shuffle_cpp(tmp_path: pathlib.Path):
     meds_dataset = tmp_path / "meds"
     create_dataset(meds_dataset)

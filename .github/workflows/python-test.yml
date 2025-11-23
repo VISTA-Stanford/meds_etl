@@ -35,6 +35,12 @@ jobs:
       run: |
         uv pip install --system -e ".[tests]"
     
+    - name: Install C++ backend (Linux only)
+      if: runner.os == 'Linux'
+      run: |
+        uv pip install --system -e ".[cpp]"
+      continue-on-error: true
+    
     - name: Run tests
       run: |
         python -m pytest tests/ -v --tb=short
@@ -63,6 +69,11 @@ jobs:
     - name: Install dependencies
       run: |
         uv pip install --system -e ".[dev]"
+    
+    - name: Install C++ backend (for coverage testing)
+      run: |
+        uv pip install --system -e ".[cpp]"
+      continue-on-error: true
     
     - name: Run tests with coverage
       run: |
