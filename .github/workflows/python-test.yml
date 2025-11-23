@@ -37,7 +37,7 @@ jobs:
     
     - name: Run tests
       run: |
-        uv run python -m pytest tests/ -v --tb=short
+        python -m pytest tests/ -v --tb=short
     
     - name: Test import
       run: |
@@ -65,7 +65,7 @@ jobs:
     
     - name: Run tests with coverage
       run: |
-        uv run python -m pytest tests/ --cov=meds_etl --cov-report=xml --cov-report=term -v
+        python -m pytest tests/ --cov=meds_etl --cov-report=xml --cov-report=term -v
     
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
