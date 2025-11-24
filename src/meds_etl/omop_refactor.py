@@ -121,7 +121,7 @@ def get_meds_schema_from_config(config: Dict) -> Dict[str, type]:
     - subject_id: Int64
     - time: Datetime(us)
     - code: Utf8
-    - numeric_value: Float64 (nullable)
+    - numeric_value: Float32 (nullable)
     - text_value: Utf8 (nullable)
     - end: Datetime(us) (nullable)
 
@@ -134,7 +134,7 @@ def get_meds_schema_from_config(config: Dict) -> Dict[str, type]:
         "subject_id": pl.Int64,
         "time": pl.Datetime("us"),
         "code": pl.Utf8,
-        "numeric_value": pl.Float64,  # FIXED: Always Float64
+        "numeric_value": pl.Float32,  # FIXED: Always Float32 (matches MEDS standard)
         "text_value": pl.Utf8,
         "end": pl.Datetime("us"),  # Optional end time
     }
@@ -925,9 +925,9 @@ def transform_to_meds_unsorted(
     text_value_field = table_config.get("text_value_field")
 
     if numeric_value_field:
-        base_exprs.append(pl.col(numeric_value_field).cast(pl.Float64).alias("numeric_value"))
+        base_exprs.append(pl.col(numeric_value_field).cast(pl.Float32).alias("numeric_value"))
     else:
-        base_exprs.append(pl.lit(None, dtype=pl.Float64).alias("numeric_value"))
+        base_exprs.append(pl.lit(None, dtype=pl.Float32).alias("numeric_value"))
 
     if text_value_field:
         base_exprs.append(pl.col(text_value_field).cast(pl.Utf8).alias("text_value"))
@@ -1047,7 +1047,7 @@ def process_omop_file_worker(args: Tuple) -> Dict:
 
         # ALWAYS write the file for debugging, even if empty
         output_file = output_dir / f"{table_name}_{uuid.uuid4()}.parquet"
-        meds_df.write_parquet(output_file, compression="lz4")
+        meds_df.write_parquet(output_file, compression="zstd", compression_level=1)
 
         # Determine which mapping was used for reporting
         code_mappings = table_config.get("code_mappings", {})
@@ -1669,17 +1669,7 @@ def run_omop_to_meds_etl(
     # ========================================================================
     # STAGE 2: External sort (partition + sort via meds_etl_cpp or Python)
     # ========================================================================
-
-    # CRITICAL: Force cleanup of all multiprocessing resources from Stage 1
-    # before calling C++ backend. The C++ backend has its own multiprocessing
-    # and leftover semaphores from Python can cause conflicts/crashes.
-    import gc
-
-    gc.collect()  # Force garbage collection to clean up any lingering resources
-
-    # Clear POLARS_MAX_THREADS to allow C++ backend to use all threads
-    if "POLARS_MAX_THREADS" in os.environ:
-        del os.environ["POLARS_MAX_THREADS"]
+    # Note: C++ backend uses subprocess isolation to prevent semaphore conflicts
 
     print("\n" + "=" * 70)
     print("STAGE 2: EXTERNAL SORT (partition + sort)")
@@ -1736,14 +1726,48 @@ def run_omop_to_meds_etl(
             print("   Warning: Python sorting loads entire shards into memory!")
             print("   For large datasets, install meds_etl_cpp for memory-bounded sorting.")
 
-        # Use the unified sort interface (same as omop.py)
-        meds_etl.unsorted.sort(
-            source_unsorted_path=str(temp_dir),
-            target_meds_path=str(output_dir / "result"),
-            num_shards=num_shards,
-            num_proc=num_workers,
-            backend=backend,
-        )
+        # Use the unified sort interface
+        # For C++ backend, use subprocess isolation to avoid semaphore conflicts
+        if backend == "cpp":
+            print("\n   Using subprocess isolation for C++ backend (prevents semaphore conflicts)")
+
+            # Call C++ backend in a completely fresh subprocess
+            # This eliminates ALL semaphore conflicts from Stage 1
+            import subprocess
+
+            subprocess_code = f"""
+import meds_etl.unsorted
+meds_etl.unsorted.sort(
+    source_unsorted_path="{temp_dir}",
+    target_meds_path="{output_dir / 'result'}",
+    num_shards={num_shards},
+    num_proc={num_workers},
+    backend="cpp"
+)
+"""
+            result = subprocess.run(
+                [sys.executable, "-c", subprocess_code],
+                capture_output=True,
+                text=True,
+            )
+
+            if result.returncode != 0:
+                print(f"\n❌ C++ backend failed with return code {result.returncode}")
+                print(f"STDOUT:\n{result.stdout}")
+                print(f"STDERR:\n{result.stderr}")
+                sys.exit(1)
+
+            if verbose and result.stdout:
+                print(result.stdout)
+        else:
+            # Polars backend can run directly (no subprocess needed)
+            meds_etl.unsorted.sort(
+                source_unsorted_path=str(temp_dir),
+                target_meds_path=str(output_dir / "result"),
+                num_shards=num_shards,
+                num_proc=num_workers,
+                backend=backend,
+            )
 
         print("   ✅ External sort complete")
 
@@ -1819,7 +1843,13 @@ def main():
         "--backend",
         choices=["cpp", "polars", "auto"],
         default="auto",
-        help="Stage 2 backend: 'auto' (try cpp, fallback polars), 'cpp' (meds_etl_cpp only), 'polars' (Python only). Default: auto",
+        help=(
+            "Stage 2 backend: "
+            "'auto' (try cpp, fallback polars), "
+            "'cpp' (meds_etl_cpp - 3x faster, uses subprocess isolation), "
+            "'polars' (Python only - slower but simpler). "
+            "Default: auto"
+        ),
     )
     parser.add_argument(
         "--code_mapping",

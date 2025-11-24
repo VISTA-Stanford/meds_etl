@@ -879,5 +879,195 @@ def test_end_to_end_simple_measurement():
     assert result["time"][0] <= result["time"][1] <= result["time"][2]
 
 
+# ============================================================================
+# NEW FEATURES TESTS: Properties, Literals, Aliasing
+# ============================================================================
+
+
+def test_properties_backwards_compat():
+    """Test that both 'properties' and 'metadata' keys work."""
+    # Test with 'metadata' (old)
+    config_old = {"tables": {"visit_occurrence": {"metadata": [{"name": "visit_id", "type": "int"}]}}}
+
+    # Test with 'properties' (new)
+    config_new = {"tables": {"visit_occurrence": {"properties": [{"name": "visit_id", "type": "int"}]}}}
+
+    result_old = get_metadata_column_info(config_old)
+    result_new = get_metadata_column_info(config_new)
+
+    assert result_old == result_new == {"visit_id": "int"}
+
+
+def test_literal_property():
+    """Test literal values in properties."""
+    df = pl.DataFrame(
+        {
+            "person_id": [1, 2, 3],
+            "visit_start_datetime": [
+                datetime.datetime(2020, 1, 1),
+                datetime.datetime(2020, 1, 2),
+                datetime.datetime(2020, 1, 3),
+            ],
+            "visit_concept_id": [1, 2, 3],
+        }
+    )
+
+    concept_df = pl.DataFrame(
+        {
+            "concept_id": [1, 2, 3],
+            "code": ["VISIT/ER", "VISIT/IP", "VISIT/OP"],
+        }
+    )
+
+    table_config = {
+        "time_start": "visit_start_datetime",
+        "code_mappings": {"concept_id": {"concept_id_field": "visit_concept_id"}},
+        "properties": [
+            {"name": "table_name", "literal": "visit_occurrence", "type": "string"},
+            {"name": "row_number", "literal": 42, "type": "int"},
+        ],
+    }
+
+    meds_schema = {
+        "subject_id": pl.Int64,
+        "time": pl.Datetime("us"),
+        "code": pl.Utf8,
+        "numeric_value": pl.Float64,
+        "text_value": pl.Utf8,
+        "end": pl.Datetime("us"),
+        "table_name": pl.Utf8,
+        "row_number": pl.Int64,
+    }
+
+    result = transform_to_meds_unsorted(
+        df=df,
+        table_config=table_config,
+        primary_key="person_id",
+        code_mapping_choice="concept_id",
+        meds_schema=meds_schema,
+        concept_df=concept_df,
+    )
+
+    # Check that literal values are applied to all rows
+    assert result["table_name"].unique().to_list() == ["visit_occurrence"]
+    assert result["row_number"].unique().to_list() == [42]
+    assert len(result) == 3
+
+
+def test_aliased_property():
+    """Test column aliasing/renaming in properties."""
+    df = pl.DataFrame(
+        {
+            "person_id": [1, 2],
+            "measurement_datetime": [
+                datetime.datetime(2020, 1, 1),
+                datetime.datetime(2020, 1, 2),
+            ],
+            "measurement_concept_id": [100, 200],
+            "measurement_id": [9999, 8888],  # Source column
+            "unit_concept_id": [5, 6],
+        }
+    )
+
+    concept_df = pl.DataFrame(
+        {
+            "concept_id": [100, 200],
+            "code": ["LOINC/1234-5", "LOINC/9876-1"],
+        }
+    )
+
+    table_config = {
+        "time_start": "measurement_datetime",
+        "code_mappings": {"concept_id": {"concept_id_field": "measurement_concept_id"}},
+        "properties": [
+            # Alias: measurement_id → meas_id
+            {"name": "measurement_id", "alias": "meas_id", "type": "int"},
+            # No alias: unit_concept_id stays the same
+            {"name": "unit_concept_id", "type": "int"},
+        ],
+    }
+
+    meds_schema = {
+        "subject_id": pl.Int64,
+        "time": pl.Datetime("us"),
+        "code": pl.Utf8,
+        "numeric_value": pl.Float64,
+        "text_value": pl.Utf8,
+        "end": pl.Datetime("us"),
+        "meas_id": pl.Int64,  # Aliased output name
+        "unit_concept_id": pl.Int64,
+    }
+
+    result = transform_to_meds_unsorted(
+        df=df,
+        table_config=table_config,
+        primary_key="person_id",
+        code_mapping_choice="concept_id",
+        meds_schema=meds_schema,
+        concept_df=concept_df,
+    )
+
+    # Check that aliasing worked
+    assert "meas_id" in result.columns
+    assert "measurement_id" not in result.columns  # Source column should not appear
+    assert result["meas_id"].to_list() == [9999, 8888]
+    assert result["unit_concept_id"].to_list() == [5, 6]
+
+
+def test_concept_mapped_template():
+    """Test template with concept_fields for concept table lookup."""
+    df = pl.DataFrame(
+        {
+            "person_id": [1, 2, 3],
+            "birth_datetime": [
+                datetime.datetime(1990, 1, 1),
+                datetime.datetime(1991, 2, 2),
+                datetime.datetime(1992, 3, 3),
+            ],
+            "gender_concept_id": [8507, 8532, 8507],  # MALE, FEMALE, MALE
+        }
+    )
+
+    # Concept table with gender concepts
+    concept_df = pl.DataFrame(
+        {
+            "concept_id": [8507, 8532],
+            "code": ["MALE", "FEMALE"],
+        }
+    )
+
+    table_config = {
+        "time_start": "birth_datetime",
+        "code_mappings": {
+            "concept_id": {
+                "template": "Gender/{gender_concept_id}",
+                "concept_fields": ["gender_concept_id"],  # Map this field via concept table
+            }
+        },
+    }
+
+    meds_schema = {
+        "subject_id": pl.Int64,
+        "time": pl.Datetime("us"),
+        "code": pl.Utf8,
+        "numeric_value": pl.Float64,
+        "text_value": pl.Utf8,
+        "end": pl.Datetime("us"),
+    }
+
+    result = transform_to_meds_unsorted(
+        df=df,
+        table_config=table_config,
+        primary_key="person_id",
+        code_mapping_choice="concept_id",
+        meds_schema=meds_schema,
+        concept_df=concept_df,
+    )
+
+    # Check that concept lookup happened before template substitution
+    assert result["code"].to_list() == ["Gender/MALE", "Gender/FEMALE", "Gender/MALE"]
+    assert len(result) == 3
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

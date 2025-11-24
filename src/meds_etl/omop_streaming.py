@@ -62,17 +62,25 @@ def get_metadata_column_info(config: Dict) -> Dict[str, str]:
     """
     Extract metadata column types from config.
 
-    Returns mapping: column_name → type_string (from config)
+    Returns mapping: output_column_name → type_string (from config)
+
+    Handles aliasing: uses "alias" if present, otherwise uses "name"
 
     Validates that columns with the same name have consistent types across all tables.
+
+    Supports both "properties" (preferred) and "metadata" (backwards compat) keys.
     """
     col_types = {}
     col_sources = {}  # Track where each type came from for error messages
 
     # From canonical events
     for event_name, event_config in config.get("canonical_events", {}).items():
-        for meta_spec in event_config.get("metadata", []):
-            col_name = meta_spec["name"]
+        # Support both "properties" and "metadata" for backwards compatibility
+        properties = event_config.get("properties") or event_config.get("metadata", [])
+
+        for meta_spec in properties:
+            # Output column name (use alias if present, else use name)
+            col_name = meta_spec.get("alias", meta_spec["name"])
             col_type = meta_spec.get("type", "string")
 
             if col_name in col_types:
@@ -90,8 +98,12 @@ def get_metadata_column_info(config: Dict) -> Dict[str, str]:
 
     # From tables
     for table_name, table_config in config.get("tables", {}).items():
-        for meta_spec in table_config.get("metadata", []):
-            col_name = meta_spec["name"]
+        # Support both "properties" and "metadata" for backwards compatibility
+        properties = table_config.get("properties") or table_config.get("metadata", [])
+
+        for meta_spec in properties:
+            # Output column name (use alias if present, else use name)
+            col_name = meta_spec.get("alias", meta_spec["name"])
             col_type = meta_spec.get("type", "string")
 
             if col_name in col_types:
@@ -846,28 +858,84 @@ def transform_to_meds_unsorted(
         concept_config = code_mappings["concept_id"]
 
         if "template" in concept_config:
-            # Template-based code generation (NO concept table lookup!)
-            # Even though this is in concept_id section, template generates literal codes
+            # Template-based code generation
             template = concept_config["template"]
 
-            parts = re.split(r"(\{[^}]+\})", template)
+            # NEW FEATURE: concept_fields enables concept table lookup before substitution
+            concept_fields_to_map = concept_config.get("concept_fields", [])
 
-            exprs = []
-            for part in parts:
-                if part.startswith("{") and part.endswith("}"):
-                    field = part[1:-1]
-                    exprs.append(pl.col(field).cast(pl.Utf8).fill_null(""))
-                elif part:
-                    exprs.append(pl.lit(part))
+            if concept_fields_to_map and concept_df is not None and len(concept_df) > 0:
+                # Strategy: Join concept table multiple times (once per concept field)
+                # Then substitute the looked-up codes into the template
 
-            # Build initial code expression
-            code_expr = pl.concat_str(exprs)
+                # Build temp DataFrame with mapped concept codes
+                temp_df = df
 
-            # Apply transforms if specified
-            transforms = concept_config.get("transforms", [])
-            code_expr = apply_transforms(code_expr, transforms)
+                for i, concept_field in enumerate(concept_fields_to_map):
+                    # Create unique alias for this concept's code
+                    code_alias = f"_concept_code_{i}_{concept_field}"
 
-            base_exprs.append(code_expr.alias("code"))
+                    # Join to get the code for this concept_id
+                    temp_df = temp_df.join(
+                        concept_df.select(
+                            [pl.col("concept_id").alias(f"_join_id_{i}"), pl.col("code").alias(code_alias)]
+                        ),
+                        left_on=concept_field,
+                        right_on=f"_join_id_{i}",
+                        how="left",
+                    )
+
+                # Now build template expression using the mapped codes
+                parts = re.split(r"(\{[^}]+\})", template)
+                exprs = []
+
+                for part in parts:
+                    if part.startswith("{") and part.endswith("}"):
+                        field = part[1:-1]
+
+                        # Check if this field should use mapped concept code
+                        if field in concept_fields_to_map:
+                            idx = concept_fields_to_map.index(field)
+                            code_alias = f"_concept_code_{idx}_{field}"
+                            exprs.append(pl.col(code_alias).cast(pl.Utf8).fill_null(f"UNKNOWN_{field.upper()}"))
+                        else:
+                            # Regular field substitution
+                            exprs.append(pl.col(field).cast(pl.Utf8).fill_null(""))
+                    elif part:
+                        exprs.append(pl.lit(part))
+
+                # Build code expression
+                code_expr = pl.concat_str(exprs)
+
+                # Apply transforms if specified
+                transforms = concept_config.get("transforms", [])
+                code_expr = apply_transforms(code_expr, transforms)
+
+                # Update df to use the temp_df with joined concept codes
+                df = temp_df
+                base_exprs.append(code_expr.alias("code"))
+
+            else:
+                # Original behavior: template without concept lookup
+                # Just substitute raw field values (e.g., concept_ids)
+                parts = re.split(r"(\{[^}]+\})", template)
+
+                exprs = []
+                for part in parts:
+                    if part.startswith("{") and part.endswith("}"):
+                        field = part[1:-1]
+                        exprs.append(pl.col(field).cast(pl.Utf8).fill_null(""))
+                    elif part:
+                        exprs.append(pl.lit(part))
+
+                # Build initial code expression
+                code_expr = pl.concat_str(exprs)
+
+                # Apply transforms if specified
+                transforms = concept_config.get("transforms", [])
+                code_expr = apply_transforms(code_expr, transforms)
+
+                base_exprs.append(code_expr.alias("code"))
 
         else:
             # Standard concept_id mapping with concept table lookup
@@ -945,12 +1013,26 @@ def transform_to_meds_unsorted(
     else:
         base_exprs.append(pl.lit(None, dtype=pl.Datetime("us")).alias("end"))
 
-    # 6. metadata columns (use config_type_to_polars for consistency)
-    for meta_spec in table_config.get("metadata", []):
-        meta_name = meta_spec["name"]
-        meta_type = meta_spec.get("type", "string")
-        meta_polars_type = config_type_to_polars(meta_type)
-        base_exprs.append(pl.col(meta_name).cast(meta_polars_type).alias(meta_name))
+    # 6. Property columns (support both "properties" and "metadata" for backwards compat)
+    properties = table_config.get("properties") or table_config.get("metadata", [])
+
+    for prop_spec in properties:
+        prop_name = prop_spec["name"]  # Source column name (from OMOP)
+        prop_type = prop_spec.get("type", "string")
+        prop_polars_type = config_type_to_polars(prop_type)
+
+        # Determine output column name
+        output_name = prop_spec.get("alias", prop_name)  # Use alias if provided, else use name
+
+        # Handle different property types:
+        if "literal" in prop_spec:
+            # Literal value (constant for all rows)
+            literal_value = prop_spec["literal"]
+            base_exprs.append(pl.lit(literal_value).cast(prop_polars_type).alias(output_name))
+        else:
+            # Standard column or aliased column
+            # prop_name is the source, output_name is the destination
+            base_exprs.append(pl.col(prop_name).cast(prop_polars_type).alias(output_name))
 
     # Build base DataFrame
     result = df.select(base_exprs)

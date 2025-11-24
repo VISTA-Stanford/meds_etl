@@ -10,20 +10,48 @@
                 "year_of_birth",
                 "month_of_birth",
                 "day_of_birth"
-            ],
-            "metadata": [
-                {
-                    "name": "gender_concept_id",
-                    "type": "int"
-                },
-                {
-                    "name": "race_concept_id",
-                    "type": "int"
-                },
-                {
-                    "name": "ethnicity_concept_id",
-                    "type": "int"
+            ]
+        },
+        "gender": {
+            "table": "person",
+            "code_mappings": {
+                "concept_id": {
+                    "template": "Gender/{gender_concept_id}"
                 }
+            },
+            "time_start": "birth_datetime",
+            "time_start_fallbacks": [
+                "year_of_birth",
+                "month_of_birth",
+                "day_of_birth"
+            ]
+        },
+        "race": {
+            "table": "person",
+            "code_mappings": {
+                "concept_id": {
+                    "template": "Race/{race_concept_id}"
+                }
+            },
+            "time_start": "birth_datetime",
+            "time_start_fallbacks": [
+                "year_of_birth",
+                "month_of_birth",
+                "day_of_birth"
+            ]
+        },
+        "ethnicity": {
+            "table": "person",
+            "code_mappings": {
+                "concept_id": {
+                    "template": "Ethnicity/{ethnicity_concept_id}"
+                }
+            },
+            "time_start": "birth_datetime",
+            "time_start_fallbacks": [
+                "year_of_birth",
+                "month_of_birth",
+                "day_of_birth"
             ]
         },
         "death": {
@@ -33,7 +61,7 @@
             "time_start_fallbacks": [
                 "death_date"
             ],
-            "metadata": [
+            "properties": [
                 {
                     "name": "cause_concept_id",
                     "type": "int"
@@ -65,13 +93,15 @@
                     "fallback_concept_id": 8
                 }
             },
-            "metadata": [
+            "properties": [
                 {
-                    "name": "visit_occurrence_id",
-                    "type": "int"
+                    "name": "table",
+                    "literal": "visit_occurrence",
+                    "type": "string"
                 },
                 {
-                    "name": "visit_type_concept_id",
+                    "name": "visit_occurrence_id",
+                    "alias": "visit_id",
                     "type": "int"
                 },
                 {
@@ -80,18 +110,6 @@
                 },
                 {
                     "name": "care_site_id",
-                    "type": "int"
-                },
-                {
-                    "name": "visit_source_concept_id",
-                    "type": "int"
-                },
-                {
-                    "name": "admitting_source_concept_id",
-                    "type": "int"
-                },
-                {
-                    "name": "discharge_to_concept_id",
                     "type": "int"
                 }
             ]
@@ -105,17 +123,15 @@
             "time_end_fallbacks": [
                 "visit_detail_end_date"
             ],
-            "metadata": [
+            "properties": [
                 {
-                    "name": "visit_detail_id",
-                    "type": "int"
+                    "name": "table",
+                    "literal": "visit_detail",
+                    "type": "string"
                 },
                 {
                     "name": "visit_occurrence_id",
-                    "type": "int"
-                },
-                {
-                    "name": "visit_detail_type_concept_id",
+                    "alias": "visit_id",
                     "type": "int"
                 },
                 {
@@ -145,13 +161,19 @@
             "time_end_fallbacks": [
                 "condition_end_date"
             ],
-            "metadata": [
+            "properties": [
+                {
+                    "name": "table",
+                    "literal": "condition_occurrence",
+                    "type": "string"
+                },
                 {
                     "name": "condition_occurrence_id",
                     "type": "int"
                 },
                 {
                     "name": "visit_occurrence_id",
+                    "alias": "visit_id",
                     "type": "int"
                 },
                 {
@@ -178,17 +200,15 @@
             "time_end_fallbacks": [
                 "drug_exposure_end_date"
             ],
-            "metadata": [
+            "properties": [
                 {
-                    "name": "drug_exposure_id",
-                    "type": "int"
+                    "name": "table",
+                    "literal": "drug_exposure",
+                    "type": "string"
                 },
                 {
                     "name": "visit_occurrence_id",
-                    "type": "int"
-                },
-                {
-                    "name": "visit_detail_id",
+                    "alias": "visit_id",
                     "type": "int"
                 },
                 {
@@ -227,25 +247,23 @@
             "time_start_fallbacks": [
                 "procedure_date"
             ],
-            "metadata": [
+            "properties": [
+                {
+                    "name": "table",
+                    "literal": "procedure_occurrence",
+                    "type": "string"
+                },
                 {
                     "name": "procedure_occurrence_id",
                     "type": "int"
                 },
                 {
                     "name": "visit_occurrence_id",
+                    "alias": "visit_id",
                     "type": "int"
                 },
                 {
                     "name": "visit_detail_id",
-                    "type": "int"
-                },
-                {
-                    "name": "procedure_type_concept_id",
-                    "type": "int"
-                },
-                {
-                    "name": "modifier_concept_id",
                     "type": "int"
                 },
                 {
@@ -272,17 +290,15 @@
             "time_end_fallbacks": [
                 "device_exposure_end_date"
             ],
-            "metadata": [
+            "properties": [
                 {
-                    "name": "device_exposure_id",
-                    "type": "int"
+                    "name": "table",
+                    "literal": "device_exposure",
+                    "type": "string"
                 },
                 {
                     "name": "visit_occurrence_id",
-                    "type": "int"
-                },
-                {
-                    "name": "device_type_concept_id",
+                    "alias": "visit_id",
                     "type": "int"
                 },
                 {
@@ -311,17 +327,19 @@
             ],
             "numeric_value_field": "value_as_number",
             "text_value_field": "value_source_value",
-            "metadata": [
+            "properties": [
+                {
+                    "name": "table",
+                    "literal": "measurement",
+                    "type": "string"
+                },
                 {
                     "name": "measurement_id",
                     "type": "int"
                 },
                 {
                     "name": "visit_occurrence_id",
-                    "type": "int"
-                },
-                {
-                    "name": "measurement_source_concept_id",
+                    "alias": "visit_id",
                     "type": "int"
                 },
                 {
@@ -358,21 +376,15 @@
             ],
             "numeric_value_field": "value_as_number",
             "text_value_field": "value_as_string",
-            "metadata": [
+            "properties": [
                 {
-                    "name": "observation_id",
-                    "type": "int"
+                    "name": "table",
+                    "literal": "observation",
+                    "type": "string"
                 },
                 {
                     "name": "visit_occurrence_id",
-                    "type": "int"
-                },
-                {
-                    "name": "visit_detail_id",
-                    "type": "int"
-                },
-                {
-                    "name": "observation_type_concept_id",
+                    "alias": "visit_id",
                     "type": "int"
                 },
                 {
@@ -404,7 +416,12 @@
                 "note_date"
             ],
             "text_value_field": "note_text",
-            "metadata": [
+            "properties": [
+                {
+                    "name": "table",
+                    "literal": "note",
+                    "type": "string"
+                },
                 {
                     "name": "note_id",
                     "type": "int"
@@ -415,14 +432,7 @@
                 },
                 {
                     "name": "visit_occurrence_id",
-                    "type": "int"
-                },
-                {
-                    "name": "visit_detail_id",
-                    "type": "int"
-                },
-                {
-                    "name": "note_type_concept_id",
+                    "alias": "visit_id",
                     "type": "int"
                 },
                 {
@@ -438,9 +448,6 @@
                             "type": "regex_replace",
                             "pattern": "\\s+",
                             "replacement": "-"
-                        },
-                        {
-                            "type": "upper"
                         }
                     ]
                 }
@@ -451,7 +458,12 @@
             "time_start_fallbacks": [
                 "image_occurrence_datetime"
             ],
-            "metadata": [
+            "properties": [
+                {
+                    "name": "table",
+                    "literal": "image_occurrence",
+                    "type": "string"
+                },
                 {
                     "name": "image_occurrence_id",
                     "type": "int"

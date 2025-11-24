@@ -20,7 +20,7 @@ A minimal configuration covering the core OMOP tables:
 Standard configuration for OMOP CDM v5.4 with:
 - All core clinical tables
 - Concept ID mappings via concept table
-- Metadata preservation
+- Property preservation
 - Standard OMOP field names
 
 **Use this for**: OMOP CDM 5.4 compliant databases
@@ -30,10 +30,18 @@ Comprehensive configuration including:
 - All core OMOP tables
 - Extended tables (note, imaging, specimen)
 - Template-based code generation
-- Custom metadata fields
+- Custom property fields
 - Advanced transforms
 
 **Use this for**: Custom OMOP implementations with additional tables
+
+### 4. `omop_etl_with_properties.json` - New Features Demo
+Demonstrates new property features (v0.2+):
+- **Literal values**: Add constant columns (e.g., table names)
+- **Column aliasing**: Rename columns (e.g., `visit_occurrence_id` → `visit_id`)
+- **"properties" key**: Modern terminology for additional columns
+
+**Use this for**: Learning new features, custom column requirements
 
 ## How to Use
 
@@ -76,7 +84,7 @@ All configs follow this structure:
       "time_start": "datetime_field",
       "code_mappings": { ... },
       "numeric_value_field": "value_field",
-      "metadata": [ ... ]
+      "properties": [ ... ]  // or "metadata" for backwards compat
     }
   }
 }
@@ -114,6 +122,119 @@ All configs follow this structure:
   }
 }
 ```
+
+### 4. Template with Concept Mapping (NEW! ✨)
+Map concept_ids to codes via concept table BEFORE substituting into template:
+
+```json
+"code_mappings": {
+  "concept_id": {
+    "template": "Gender/{gender_concept_id}",
+    "concept_fields": ["gender_concept_id"]
+  }
+}
+```
+
+**Without `concept_fields`:** `gender_concept_id=8507` → `"Gender/8507"`  
+**With `concept_fields`:** `gender_concept_id=8507` → lookup in concept table → `"Gender/MALE"`
+
+**Use case:** Canonical events like gender/race/ethnicity where you want human-readable codes.
+
+## Properties (Additional Columns)
+
+**Note:** Both `"properties"` and `"metadata"` keys are supported for backwards compatibility. We recommend using `"properties"` (matches MEDS terminology for non-core columns).
+
+### 1. Standard Properties
+Add OMOP columns to MEDS output (same name in input and output):
+
+```json
+"properties": [
+  {
+    "name": "visit_occurrence_id",
+    "type": "int"
+  },
+  {
+    "name": "provider_id",
+    "type": "int"
+  }
+]
+```
+
+**Output columns:** `visit_occurrence_id`, `provider_id`
+
+### 2. Aliased Properties
+Rename OMOP columns in MEDS output:
+
+```json
+"properties": [
+  {
+    "name": "visit_occurrence_id",  // OMOP column name
+    "alias": "visit_id",            // MEDS output name
+    "type": "int"
+  },
+  {
+    "name": "measurement_id",
+    "alias": "meas_id",
+    "type": "int"
+  }
+]
+```
+
+**Output columns:** `visit_id`, `meas_id` (original names are replaced)
+
+### 3. Literal Properties
+Add constant values (same for all rows in a table):
+
+```json
+"properties": [
+  {
+    "name": "table_name",
+    "literal": "visit_occurrence",
+    "type": "string"
+  },
+  {
+    "name": "dataset_version",
+    "literal": 2,
+    "type": "int"
+  }
+]
+```
+
+**Use cases:**
+- Track source table for downstream analysis
+- Add version/batch identifiers
+- Flag data subsets
+
+### 4. Combining Property Types
+Mix and match in the same table:
+
+```json
+"properties": [
+  {
+    "name": "table_name",
+    "literal": "measurement",
+    "type": "string"
+  },
+  {
+    "name": "measurement_id",
+    "alias": "meas_id",
+    "type": "int"
+  },
+  {
+    "name": "unit_concept_id",
+    "type": "int"
+  }
+]
+```
+
+**Output columns:** `table_name` (literal), `meas_id` (aliased), `unit_concept_id` (standard)
+
+### Supported Types
+- `"int"` or `"integer"` → Int64
+- `"float"` → Float64
+- `"string"` or `"str"` → Utf8
+- `"boolean"` or `"bool"` → Boolean
+- `"datetime"` → Datetime(us)
 
 ## Need Help?
 
