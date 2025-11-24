@@ -1726,48 +1726,14 @@ def run_omop_to_meds_etl(
             print("   Warning: Python sorting loads entire shards into memory!")
             print("   For large datasets, install meds_etl_cpp for memory-bounded sorting.")
 
-        # Use the unified sort interface
-        # For C++ backend, use subprocess isolation to avoid semaphore conflicts
-        if backend == "cpp":
-            print("\n   Using subprocess isolation for C++ backend (prevents semaphore conflicts)")
-
-            # Call C++ backend in a completely fresh subprocess
-            # This eliminates ALL semaphore conflicts from Stage 1
-            import subprocess
-
-            subprocess_code = f"""
-import meds_etl.unsorted
-meds_etl.unsorted.sort(
-    source_unsorted_path="{temp_dir}",
-    target_meds_path="{output_dir / 'result'}",
-    num_shards={num_shards},
-    num_proc={num_workers},
-    backend="cpp"
-)
-"""
-            result = subprocess.run(
-                [sys.executable, "-c", subprocess_code],
-                capture_output=True,
-                text=True,
-            )
-
-            if result.returncode != 0:
-                print(f"\n❌ C++ backend failed with return code {result.returncode}")
-                print(f"STDOUT:\n{result.stdout}")
-                print(f"STDERR:\n{result.stderr}")
-                sys.exit(1)
-
-            if verbose and result.stdout:
-                print(result.stdout)
-        else:
-            # Polars backend can run directly (no subprocess needed)
-            meds_etl.unsorted.sort(
-                source_unsorted_path=str(temp_dir),
-                target_meds_path=str(output_dir / "result"),
-                num_shards=num_shards,
-                num_proc=num_workers,
-                backend=backend,
-            )
+        # Use the unified sort interface (same as omop.py)
+        meds_etl.unsorted.sort(
+            source_unsorted_path=str(temp_dir),
+            target_meds_path=str(output_dir / "result"),
+            num_shards=num_shards,
+            num_proc=num_workers,
+            backend=backend,
+        )
 
         print("   ✅ External sort complete")
 
@@ -1846,8 +1812,8 @@ def main():
         help=(
             "Stage 2 backend: "
             "'auto' (try cpp, fallback polars), "
-            "'cpp' (meds_etl_cpp - 3x faster, uses subprocess isolation), "
-            "'polars' (Python only - slower but simpler). "
+            "'cpp' (meds_etl_cpp - 3x faster, memory-bounded), "
+            "'polars' (Python only - slower, loads shards into memory). "
             "Default: auto"
         ),
     )
