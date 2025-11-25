@@ -1,0 +1,357 @@
+{
+  "experiment_type": "full",
+  "timestamp": "20251121_233928",
+  "num_experiments": 12,
+  "num_successful": 12,
+  "num_failed": 0,
+  "results": [
+    {
+      "experiment_id": "full_1",
+      "params": {
+        "workers": 4,
+        "shards": 10,
+        "chunk_rows": 5000000,
+        "code_mapping": "auto",
+        "run_compression": "lz4",
+        "final_compression": "zstd",
+        "merge_workers": 0,
+        "low_memory": false,
+        "row_group_size": 100000,
+        "verbose": false
+      },
+      "elapsed_seconds": 171.01918816566467,
+      "elapsed_minutes": 2.850319802761078,
+      "success": true,
+      "exit_code": 0,
+      "output_dir": "data/benchmarking/full/full_1",
+      "stage_timings": {
+        "stage1": 47.03,
+        "stage2": 115.24,
+        "total": 162.28
+      },
+      "stats": {
+        "num_files": 10,
+        "total_size_gb": 3.691500334069133
+      }
+    },
+    {
+      "experiment_id": "full_2",
+      "params": {
+        "workers": 4,
+        "shards": 10,
+        "chunk_rows": 10000000,
+        "code_mapping": "auto",
+        "run_compression": "lz4",
+        "final_compression": "zstd",
+        "merge_workers": 0,
+        "low_memory": false,
+        "row_group_size": 100000,
+        "verbose": false
+      },
+      "elapsed_seconds": 175.46475458145142,
+      "elapsed_minutes": 2.9244125763575237,
+      "success": true,
+      "exit_code": 0,
+      "output_dir": "data/benchmarking/full/full_2",
+      "stage_timings": {
+        "stage1": 46.62,
+        "stage2": 119.88,
+        "total": 166.5
+      },
+      "stats": {
+        "num_files": 10,
+        "total_size_gb": 3.69144721981138
+      }
+    },
+    {
+      "experiment_id": "full_3",
+      "params": {
+        "workers": 4,
+        "shards": 20,
+        "chunk_rows": 5000000,
+        "code_mapping": "auto",
+        "run_compression": "lz4",
+        "final_compression": "zstd",
+        "merge_workers": 0,
+        "low_memory": false,
+        "row_group_size": 100000,
+        "verbose": false
+      },
+      "elapsed_seconds": 170.01771688461304,
+      "elapsed_minutes": 2.8336286147435508,
+      "success": true,
+      "exit_code": 0,
+      "output_dir": "data/benchmarking/full/full_3",
+      "stage_timings": {
+        "stage1": 46.23,
+        "stage2": 114.92,
+        "total": 161.15
+      },
+      "stats": {
+        "num_files": 20,
+        "total_size_gb": 3.691023727878928
+      }
+    },
+    {
+      "experiment_id": "full_4",
+      "params": {
+        "workers": 4,
+        "shards": 20,
+        "chunk_rows": 10000000,
+        "code_mapping": "auto",
+        "run_compression": "lz4",
+        "final_compression": "zstd",
+        "merge_workers": 0,
+        "low_memory": false,
+        "row_group_size": 100000,
+        "verbose": false
+      },
+      "elapsed_seconds": 171.39237570762634,
+      "elapsed_minutes": 2.8565395951271055,
+      "success": true,
+      "exit_code": 0,
+      "output_dir": "data/benchmarking/full/full_4",
+      "stage_timings": {
+        "stage1": 47.13,
+        "stage2": 115.49,
+        "total": 162.62
+      },
+      "stats": {
+        "num_files": 20,
+        "total_size_gb": 3.6911088116467
+      }
+    },
+    {
+      "experiment_id": "full_5",
+      "params": {
+        "workers": 8,
+        "shards": 10,
+        "chunk_rows": 5000000,
+        "code_mapping": "auto",
+        "run_compression": "lz4",
+        "final_compression": "zstd",
+        "merge_workers": 0,
+        "low_memory": false,
+        "row_group_size": 100000,
+        "verbose": false
+      },
+      "elapsed_seconds": 115.56812167167664,
+      "elapsed_minutes": 1.9261353611946106,
+      "success": true,
+      "exit_code": 0,
+      "output_dir": "data/benchmarking/full/full_5",
+      "stage_timings": {
+        "stage1": 23.79,
+        "stage2": 83.7,
+        "total": 107.49
+      },
+      "stats": {
+        "num_files": 10,
+        "total_size_gb": 3.6916050175204873
+      }
+    },
+    {
+      "experiment_id": "full_6",
+      "params": {
+        "workers": 8,
+        "shards": 10,
+        "chunk_rows": 10000000,
+        "code_mapping": "auto",
+        "run_compression": "lz4",
+        "final_compression": "zstd",
+        "merge_workers": 0,
+        "low_memory": false,
+        "row_group_size": 100000,
+        "verbose": false
+      },
+      "elapsed_seconds": 117.51131820678711,
+      "elapsed_minutes": 1.9585219701131185,
+      "success": true,
+      "exit_code": 0,
+      "output_dir": "data/benchmarking/full/full_6",
+      "stage_timings": {
+        "stage1": 23.73,
+        "stage2": 85.27,
+        "total": 109.0
+      },
+      "stats": {
+        "num_files": 10,
+        "total_size_gb": 3.6915558576583862
+      }
+    },
+    {
+      "experiment_id": "full_7",
+      "params": {
+        "workers": 8,
+        "shards": 20,
+        "chunk_rows": 5000000,
+        "code_mapping": "auto",
+        "run_compression": "lz4",
+        "final_compression": "zstd",
+        "merge_workers": 0,
+        "low_memory": false,
+        "row_group_size": 100000,
+        "verbose": false
+      },
+      "elapsed_seconds": 109.66393494606018,
+      "elapsed_minutes": 1.827732249101003,
+      "success": true,
+      "exit_code": 0,
+      "output_dir": "data/benchmarking/full/full_7",
+      "stage_timings": {
+        "stage1": 23.66,
+        "stage2": 77.59,
+        "total": 101.25
+      },
+      "stats": {
+        "num_files": 20,
+        "total_size_gb": 3.691071068868041
+      }
+    },
+    {
+      "experiment_id": "full_8",
+      "params": {
+        "workers": 8,
+        "shards": 20,
+        "chunk_rows": 10000000,
+        "code_mapping": "auto",
+        "run_compression": "lz4",
+        "final_compression": "zstd",
+        "merge_workers": 0,
+        "low_memory": false,
+        "row_group_size": 100000,
+        "verbose": false
+      },
+      "elapsed_seconds": 109.15955305099487,
+      "elapsed_minutes": 1.8193258841832478,
+      "success": true,
+      "exit_code": 0,
+      "output_dir": "data/benchmarking/full/full_8",
+      "stage_timings": {
+        "stage1": 23.82,
+        "stage2": 76.82,
+        "total": 100.64
+      },
+      "stats": {
+        "num_files": 20,
+        "total_size_gb": 3.691089059226215
+      }
+    },
+    {
+      "experiment_id": "full_9",
+      "params": {
+        "workers": 16,
+        "shards": 10,
+        "chunk_rows": 5000000,
+        "code_mapping": "auto",
+        "run_compression": "lz4",
+        "final_compression": "zstd",
+        "merge_workers": 0,
+        "low_memory": false,
+        "row_group_size": 100000,
+        "verbose": false
+      },
+      "elapsed_seconds": 86.77270030975342,
+      "elapsed_minutes": 1.4462116718292237,
+      "success": true,
+      "exit_code": 0,
+      "output_dir": "data/benchmarking/full/full_9",
+      "stage_timings": {
+        "stage1": 12.35,
+        "stage2": 66.33,
+        "total": 78.68
+      },
+      "stats": {
+        "num_files": 10,
+        "total_size_gb": 3.6915875915437937
+      }
+    },
+    {
+      "experiment_id": "full_10",
+      "params": {
+        "workers": 16,
+        "shards": 10,
+        "chunk_rows": 10000000,
+        "code_mapping": "auto",
+        "run_compression": "lz4",
+        "final_compression": "zstd",
+        "merge_workers": 0,
+        "low_memory": false,
+        "row_group_size": 100000,
+        "verbose": false
+      },
+      "elapsed_seconds": 88.93104696273804,
+      "elapsed_minutes": 1.482184116045634,
+      "success": true,
+      "exit_code": 0,
+      "output_dir": "data/benchmarking/full/full_10",
+      "stage_timings": {
+        "stage1": 12.55,
+        "stage2": 67.86,
+        "total": 80.41
+      },
+      "stats": {
+        "num_files": 10,
+        "total_size_gb": 3.691426081582904
+      }
+    },
+    {
+      "experiment_id": "full_11",
+      "params": {
+        "workers": 16,
+        "shards": 20,
+        "chunk_rows": 5000000,
+        "code_mapping": "auto",
+        "run_compression": "lz4",
+        "final_compression": "zstd",
+        "merge_workers": 0,
+        "low_memory": false,
+        "row_group_size": 100000,
+        "verbose": false
+      },
+      "elapsed_seconds": 78.42309093475342,
+      "elapsed_minutes": 1.3070515155792237,
+      "success": true,
+      "exit_code": 0,
+      "output_dir": "data/benchmarking/full/full_11",
+      "stage_timings": {
+        "stage1": 12.34,
+        "stage2": 57.75,
+        "total": 70.09
+      },
+      "stats": {
+        "num_files": 20,
+        "total_size_gb": 3.6911668153479695
+      }
+    },
+    {
+      "experiment_id": "full_12",
+      "params": {
+        "workers": 16,
+        "shards": 20,
+        "chunk_rows": 10000000,
+        "code_mapping": "auto",
+        "run_compression": "lz4",
+        "final_compression": "zstd",
+        "merge_workers": 0,
+        "low_memory": false,
+        "row_group_size": 100000,
+        "verbose": false
+      },
+      "elapsed_seconds": 76.46399927139282,
+      "elapsed_minutes": 1.274399987856547,
+      "success": true,
+      "exit_code": 0,
+      "output_dir": "data/benchmarking/full/full_12",
+      "stage_timings": {
+        "stage1": 12.19,
+        "stage2": 56.03,
+        "total": 68.22
+      },
+      "stats": {
+        "num_files": 20,
+        "total_size_gb": 3.6910994173958898
+      }
+    }
+  ]
+}

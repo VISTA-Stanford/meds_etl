@@ -33,11 +33,11 @@
 ### Key Features
 
 ✅ **Config-Driven Architecture** - Define complex transformations in JSON, no code changes needed  
-✅ **Ultra-Fast C++ Backend** - Optional native acceleration for production workloads (Linux only)  
+✅ **Ultra-Fast C++ Backend** - Optional native acceleration for production workloads (Linux, macOS)  
 ✅ **Production Ready** - Comprehensive test suite (30+ tests), validated on large datasets  
 ✅ **Flexible Code Mapping** - Template-based code generation, concept table joins, source values  
 ✅ **Memory Efficient** - Streaming operations, configurable memory limits, low-memory modes  
-✅ **Multiple Deployment Options** - Laptop-friendly Python or production C++ backend  
+✅ **Auto-Fallback** - Automatically uses Python if C++ backend unavailable  
 
 ### Supported Data Sources
 
@@ -65,13 +65,18 @@ pip install uv
 uv pip install meds_etl
 ```
 
-### Production Installation (with C++ Backend - Linux Only)
+### Production Installation (with C++ Backend - Linux & macOS)
 
 ```bash
+# Install from PyPI (standard release)
 uv pip install meds_etl[cpp]
+
+# Or install latest version with macOS arm64 support
+uv pip install meds_etl
+uv pip install git+https://github.com/VISTA-Stanford/meds_etl_cpp.git@arm64
 ```
 
-**Note:** The C++ backend (`meds_etl_cpp`) is currently only available for Linux. macOS and Windows users should use the pure Python implementation.
+**Note:** The C++ backend (`meds_etl_cpp`) is available for Linux and macOS. The [VISTA-Stanford fork](https://github.com/VISTA-Stanford/meds_etl_cpp/tree/arm64) includes native support for macOS arm64 (Apple Silicon) and provides optimized parallel processing using C++17 with Arrow-based columnar data handling. Windows users will automatically use the pure Python fallback.
 
 ### Development Installation
 
@@ -80,7 +85,10 @@ git clone https://github.com/Medical-Event-Data-Standard/meds_etl.git
 cd meds_etl
 
 # Install with uv (recommended)
-uv pip install -e ".[tests,cpp]"
+uv pip install -e ".[tests]"
+
+# Install C++ backend for maximum performance (Linux & macOS)
+uv pip install git+https://github.com/VISTA-Stanford/meds_etl_cpp.git@arm64
 ```
 
 ---
@@ -89,22 +97,25 @@ uv pip install -e ".[tests,cpp]"
 
 ### Which Script Should I Use?
 
-| Script | Use Case | Backend | Speed | Platform |
-|--------|----------|---------|-------|----------|
-| **`omop_refactor.py`** | **Production pipelines** | C++ (auto-fallback to Python) | ⚡ **Fastest** | Linux (C++), Any (Python) |
-| **`omop_streaming.py`** | **Development, laptops, small machines** | Pure Python (Polars) | 🚀 Fast, memory-efficient | Any |
-| `omop.py` | Legacy (hardcoded schema) | Python or C++ | Medium | Any |
+| Script | Status | Backend | Speed | Platform |
+|--------|--------|---------|-------|----------|
+| **`omop_refactor.py`** | ✅ **Recommended** | C++ with Python fallback | ⚡ **Fastest** | Linux, macOS (C++), Windows (Python) |
+| `omop_streaming.py` | ⚠️ **Deprecated** | Pure Python (Polars) | Slow | Any |
+| `omop.py` | ⚠️ **Legacy** | Python or C++ | Medium | Any |
+
+**Use `omop_refactor.py` for all new projects.** It automatically uses the C++ backend when available and falls back to Python otherwise.
 
 ---
 
-## 🚀 Production: `omop_refactor.py` (Recommended)
+## 🚀 `omop_refactor.py` (Recommended)
 
-**Best for:** Large datasets, production servers, Linux machines
+**This is the preferred script for all OMOP → MEDS ETL pipelines.**
 
 ### Features
-- ✅ **Ultra-fast C++ backend** (~6x faster than Python)
+- ✅ **Ultra-fast C++ backend** (~7x faster than deprecated scripts)
 - ✅ **Config-driven** - No code changes needed
 - ✅ **Auto-fallback** - Uses Python if C++ unavailable
+- ✅ **Cross-platform** - Works on Linux, macOS, Windows
 - ✅ **Simple interface** - Single command for entire pipeline
 
 ### Usage
@@ -130,62 +141,25 @@ uv run python -m meds_etl.omop_refactor \
 
 **Hardware:** 128 CPU cores, 1TB RAM (Linux server)
 
-| Backend | Total Time | Stage 1 | Stage 2 | Speedup vs Legacy |
-|---------|------------|---------|---------|-------------------|
-| **C++ (omop_refactor)** | **5m 26s** | ~3m | **2m 38s** | **6x faster** |
-| Python (omop_streaming) | 39m 28s | 1m 20s | 38m 7s | 2.1x faster |
-| Legacy omop.py (C++) | 29m 57s | N/A | N/A | Baseline (old) |
-| Legacy omop.py (Python) | 82m 58s | N/A | N/A | Baseline (old) |
+| Script | Backend | Total Time | Stage 1 | Stage 2 | Status |
+|--------|---------|------------|---------|---------|--------|
+| **omop_refactor.py** | **C++** | **5m 26s** | ~3m | **2m 38s** | ✅ **Recommended** |
+| omop_refactor.py | Python | ~39m | ~1m | ~38m | ✅ Auto-fallback |
+| omop_streaming.py | Python | 39m 28s | 1m 20s | 38m 7s | ⚠️ Deprecated |
+| omop.py | C++ | 29m 57s | N/A | N/A | ⚠️ Legacy |
+| omop.py | Python | 82m 58s | N/A | N/A | ⚠️ Legacy |
 
 **Key Insights:** 
 
-- C++ backend (`omop_refactor`) is **7.3x faster** than pure Python (`omop_streaming`)
-- Both new implementations are **significantly faster** than legacy code
-- `omop_streaming` throughput: **1.30M rows/sec** on 128 workers
-
----
-
-## 💻 Development: `omop_streaming.py`
-
-**Best for:** Laptops, small machines, development, debugging
-
-### Features
-- ✅ **Pure Python** - No C++ compilation needed
-- ✅ **Memory-efficient** - Streaming operations, low-memory mode
-- ✅ **Cross-platform** - Works on macOS, Windows, Linux
-- ✅ **Detailed control** - Fine-tune memory usage, chunk sizes
-
-### Usage
-
-```bash
-uv run python -m meds_etl.omop_streaming \
-  --omop_dir /path/to/omop/parquet \
-  --output_dir /path/to/meds/output \
-  --config examples/omop_etl_vista_config.json \
-  --workers 4 \
-  --shards 10 \
-  --low_memory \
-  --verbose
-
-# Memory optimization options:
-#   --low_memory          # Enable low-memory mode
-#   --chunk_rows 5000000  # Rows per sorted run (lower = less memory)
-#   --merge_workers 2     # Parallel merge workers
-#   --polars_threads 1    # Threads per worker
-```
-
-### When to Use `omop_streaming.py`
-
-- 🖥️ **Developing on a laptop** (limited RAM)
-- 🐛 **Debugging transformations** (easier to trace Python code)
-- 🪟 **Non-Linux platforms** (macOS, Windows)
-- 📊 **Small datasets** (<10GB) where speed isn't critical
+- **omop_refactor.py with C++ backend is 7.3x faster** than deprecated Python-only scripts
+- C++ backend available on Linux and macOS
+- Automatic fallback to Python ensures cross-platform compatibility
 
 ---
 
 ## 📝 Configuration Guide
 
-Both `omop_refactor.py` and `omop_streaming.py` use the same JSON configuration format.
+`omop_refactor.py` uses a flexible JSON configuration format.
 
 ### Basic Config Structure
 
@@ -285,7 +259,7 @@ Run with `--code_mapping concept_id` or `--code_mapping source_value`
 
 ## ⚙️ Command-Line Reference
 
-### `omop_refactor` (Production)
+### `omop_refactor` (Recommended)
 
 ```bash
 uv run python -m meds_etl.omop_refactor \
@@ -299,33 +273,13 @@ uv run python -m meds_etl.omop_refactor \
   --verbose                    # Detailed logging
 ```
 
-### `omop_streaming` (Development)
-
-```bash
-uv run python -m meds_etl.omop_streaming \
-  --omop_dir PATH              # OMOP data directory (Parquet files)
-  --output_dir PATH            # Output directory for MEDS
-  --config PATH                # Config JSON file (required)
-  --workers 4                  # Parallel workers for Stage 1 & 2.1
-  --shards 10                  # Number of output shards
-  --merge_workers 2            # Workers for Stage 2.2 merge
-  --chunk_rows 10000000        # Rows per sorted run
-  --code_mapping auto          # Code mapping strategy
-  --run_compression lz4        # Intermediate compression (lz4/zstd/snappy)
-  --final_compression zstd     # Final compression (zstd/snappy/lz4)
-  --low_memory                 # Enable low-memory mode
-  --row_group_size 100000      # Parquet row group size
-  --polars_threads 1           # Polars threads per worker
-  --verbose                    # Detailed logging
-```
-
 ---
 
 ## 🏗️ Architecture
 
 ### Pipeline Stages
 
-Both `omop_refactor.py` and `omop_streaming.py` use a two-stage pipeline:
+`omop_refactor.py` uses a two-stage pipeline:
 
 #### **Stage 1: OMOP → MEDS Unsorted**
 - Parallel processing of OMOP tables
@@ -335,23 +289,21 @@ Both `omop_refactor.py` and `omop_streaming.py` use a two-stage pipeline:
 - Configurable via JSON
 
 #### **Stage 2: External Sort**
-- **C++ Backend (omop_refactor):** Memory-bounded k-way merge with multi-threading
-- **Python Backend (omop_streaming):** Polars streaming with configurable chunking
+- **C++ Backend (Linux, macOS):** Memory-bounded k-way merge with multi-threading
+- **Python Backend (Fallback):** Polars streaming with configurable chunking
 - Partitions by `subject_id % num_shards`
 - Produces sorted MEDS output
 
-### Memory Optimization
+### Performance Tuning
 
 ```bash
-# Low memory mode (32-64GB machines) - omop_streaming
-uv run python -m meds_etl.omop_streaming \
-  --low_memory \
-  --chunk_rows 5000000 \
-  --row_group_size 50000 \
-  --polars_threads 1 \
-  --merge_workers 1
+# Standard configuration (works on most systems)
+uv run python -m meds_etl.omop_refactor \
+  --workers 8 \
+  --shards 100 \
+  --backend auto
 
-# High performance mode (128GB+ machines) - omop_refactor
+# High-performance server (128GB+ RAM)
 uv run python -m meds_etl.omop_refactor \
   --workers 16 \
   --shards 100 \
@@ -366,34 +318,17 @@ uv run python -m meds_etl.omop_refactor \
 
 **Hardware:** 128 CPU cores, 1TB RAM (Linux server)
 
-| Implementation | Stage 1 | Stage 2 | Total Time | Throughput | Notes |
-|----------------|---------|---------|------------|------------|-------|
-| **omop_refactor (C++)** | ~3m | **2m 38s** | **5m 26s** | N/A | ⚡ **Fastest** |
-| **omop_streaming (Python)** | **1m 20s** | **38m 7s** | **39m 28s** | **1.30M rows/s** | Pure Python, 128 workers |
-| omop.py (C++) | N/A | N/A | 29m 57s | N/A | Legacy |
-| omop.py (Python) | N/A | N/A | 82m 58s | N/A | Legacy |
+| Script | Backend | Total Time | Notes |
+|--------|---------|------------|-------|
+| **omop_refactor.py** | **C++** | **5m 26s** | ⚡ **Recommended** |
+| omop_refactor.py | Python | ~39m | Auto-fallback |
+| omop_streaming.py | Python | 39m 28s | ⚠️ Deprecated |
+| omop.py | C++ | 29m 57s | ⚠️ Legacy |
+| omop.py | Python | 82m 58s | ⚠️ Legacy |
 
-**Key Insight:** 
-- `omop_refactor` with C++ backend is **7.3x faster** than `omop_streaming`
-- `omop_streaming` is still **2.1x faster** than legacy `omop.py` (Python)
-- Both new implementations are **significantly faster** than legacy code
+**Configuration:** `--workers 8 --shards 100 --backend auto`
 
-### Configuration Details
-
-**Test Environment:** 128 CPU cores, 1TB RAM, Linux server
-
-**omop_streaming (39m 28s):**
-```bash
---workers 128 --shards 128 --chunk_rows 10_000_000 
---merge_workers 48 --run_compression lz4 --final_compression zstd
-```
-
-**omop_refactor (5m 26s):**
-```bash
---workers 8 --shards 100 --backend cpp
-```
-
-**Note:** Performance will scale with available CPU cores and RAM. These benchmarks represent optimal performance on a high-end server.
+**Note:** Use `omop_refactor.py` for all new projects. It's 7.3x faster with C++ and automatically falls back to Python when needed.
 
 ---
 
@@ -467,7 +402,10 @@ git clone https://github.com/Medical-Event-Data-Standard/meds_etl.git
 cd meds_etl
 
 # Install with dev dependencies
-uv pip install -e ".[dev,cpp]"
+uv pip install -e ".[dev]"
+
+# Install C++ backend (optional, for performance)
+uv pip install git+https://github.com/VISTA-Stanford/meds_etl_cpp.git@arm64
 
 # Run tests
 uv run python -m pytest -v
@@ -482,13 +420,13 @@ isort src/ tests/
 ```
 meds_etl/
 ├── src/meds_etl/
-│   ├── omop_refactor.py    # Production ETL (C++ backend) ⭐
-│   ├── omop_streaming.py   # Development ETL (Pure Python) ⭐
-│   ├── omop.py             # Legacy OMOP ETL
+│   ├── omop_refactor.py    # ⭐ Recommended ETL (C++ + Python)
+│   ├── omop_streaming.py   # ⚠️ Deprecated (Pure Python)
+│   ├── omop.py             # ⚠️ Legacy
 │   ├── mimic/              # MIMIC-IV ETL
 │   └── unsorted.py         # Sorting utilities
 ├── tests/
-│   ├── test_omop_streaming.py  # 25+ tests for streaming ETL
+│   ├── test_omop_streaming.py  # 25+ tests
 │   └── test_*.py           # Other test files
 ├── examples/
 │   └── omop_*.json         # Example configurations
@@ -506,22 +444,31 @@ meds_etl/
 
 ---
 
-## 🔄 Legacy: `omop.py`
+## ⚠️ Deprecated Scripts
 
-The original `omop.py` script is still available for backward compatibility but is **not recommended** for new projects. It uses a hardcoded schema (no config file) and is significantly slower than the refactored versions.
+### `omop_streaming.py` and `omop.py`
+
+These scripts are **deprecated** and maintained only for backward compatibility. 
+
+**Please use `omop_refactor.py` for all new projects.**
+
+#### Why deprecated?
+
+- **7.3x slower** than `omop_refactor.py` with C++ backend
+- **Limited optimization** compared to modern implementation
+- **No longer actively developed**
+
+#### Migration
 
 ```bash
-# Legacy usage (not recommended)
-uv run python -m meds_etl.omop \
-  /path/to/omop/data \
-  /path/to/meds/output \
-  --num_shards 10 \
-  --num_proc 8 \
-  --backend cpp \
-  --omop_version 5.4
+# Old (deprecated)
+python -m meds_etl.omop_streaming --omop_dir ... --config ...
+
+# New (recommended)
+python -m meds_etl.omop_refactor --omop_dir ... --config ...
 ```
 
-**Migration:** Use `omop_refactor.py` (production) or `omop_streaming.py` (development) instead.
+The configuration format is the same, making migration straightforward.
 
 ---
 
