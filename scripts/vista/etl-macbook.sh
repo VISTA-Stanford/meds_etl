@@ -10,11 +10,11 @@ uv run python -m meds_etl.omop_refactor \
   --force-refresh
 
 
-uv run python -m meds_etl.omop_refactor_streaming \
+uv run python -m meds_etl.omop_streaming \
   --omop_dir ../vista-data-pipelines/local/som-nero-plevriti-deidbdf.vista_debug_large/ \
   --output_dir data/meds_omop_streams \
-  --config omop_etl_vista_config.json \
-  --workers 8 \
+  --config examples/omop_etl_vista_config.json \
+  --workers 12 \
   --shards 10 \
   --row_group_size 200_000 \
   --polars_threads 1 \

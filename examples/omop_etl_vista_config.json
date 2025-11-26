@@ -5,12 +5,7 @@
         "birth": {
             "code": "MEDS_BIRTH",
             "table": "person",
-            "time_start": "birth_datetime",
-            "time_start_fallbacks": [
-                "year_of_birth",
-                "month_of_birth",
-                "day_of_birth"
-            ]
+            "time_start": "birth_datetime"
         },
         "gender": {
             "table": "person",
@@ -19,12 +14,7 @@
                     "template": "Gender/{gender_concept_id}"
                 }
             },
-            "time_start": "birth_datetime",
-            "time_start_fallbacks": [
-                "year_of_birth",
-                "month_of_birth",
-                "day_of_birth"
-            ]
+            "time_start": "birth_datetime"
         },
         "race": {
             "table": "person",
@@ -33,12 +23,7 @@
                     "template": "Race/{race_concept_id}"
                 }
             },
-            "time_start": "birth_datetime",
-            "time_start_fallbacks": [
-                "year_of_birth",
-                "month_of_birth",
-                "day_of_birth"
-            ]
+            "time_start": "birth_datetime"
         },
         "ethnicity": {
             "table": "person",
@@ -47,12 +32,7 @@
                     "template": "Ethnicity/{ethnicity_concept_id}"
                 }
             },
-            "time_start": "birth_datetime",
-            "time_start_fallbacks": [
-                "year_of_birth",
-                "month_of_birth",
-                "day_of_birth"
-            ]
+            "time_start": "birth_datetime"
         },
         "death": {
             "code": "MEDS_DEATH",
@@ -220,14 +200,6 @@
                     "type": "int"
                 },
                 {
-                    "name": "quantity",
-                    "type": "float"
-                },
-                {
-                    "name": "days_supply",
-                    "type": "int"
-                },
-                {
                     "name": "provider_id",
                     "type": "int"
                 }
@@ -347,14 +319,6 @@
                     "type": "string"
                 },
                 {
-                    "name": "range_low",
-                    "type": "float"
-                },
-                {
-                    "name": "range_high",
-                    "type": "float"
-                },
-                {
                     "name": "provider_id",
                     "type": "int"
                 }
@@ -385,10 +349,6 @@
                 {
                     "name": "visit_occurrence_id",
                     "alias": "visit_id",
-                    "type": "int"
-                },
-                {
-                    "name": "unit_concept_id",
                     "type": "int"
                 },
                 {

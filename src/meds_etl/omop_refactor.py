@@ -61,9 +61,9 @@ def config_type_to_polars(type_str: str) -> type:
     return type_map.get(type_str.lower(), pl.Utf8)
 
 
-def get_metadata_column_info(config: Dict) -> Dict[str, str]:
+def get_property_column_info(config: Dict) -> Dict[str, str]:
     """
-    Extract metadata column types from config.
+    Extract property column types from config.
 
     Returns mapping: column_name → type_string (from config)
 
@@ -74,15 +74,17 @@ def get_metadata_column_info(config: Dict) -> Dict[str, str]:
 
     # From canonical events
     for event_name, event_config in config.get("canonical_events", {}).items():
-        for meta_spec in event_config.get("metadata", []):
-            col_name = meta_spec["name"]
+        properties = event_config.get("properties", [])
+        for meta_spec in properties:
+            # Output column name (use alias if present, else use name)
+            col_name = meta_spec.get("alias", meta_spec["name"])
             col_type = meta_spec.get("type", "string")
 
             if col_name in col_types:
                 # Check consistency
                 if col_types[col_name] != col_type:
                     raise ValueError(
-                        f"Metadata column '{col_name}' has inconsistent types in config:\n"
+                        f"Property column '{col_name}' has inconsistent types in config:\n"
                         f"  {col_sources[col_name]}: {col_types[col_name]}\n"
                         f"  canonical_event '{event_name}': {col_type}\n"
                         f"All instances of the same column must have the same type!"
@@ -93,15 +95,17 @@ def get_metadata_column_info(config: Dict) -> Dict[str, str]:
 
     # From tables
     for table_name, table_config in config.get("tables", {}).items():
-        for meta_spec in table_config.get("metadata", []):
-            col_name = meta_spec["name"]
+        properties = table_config.get("properties", [])
+        for meta_spec in properties:
+            # Output column name (use alias if present, else use name)
+            col_name = meta_spec.get("alias", meta_spec["name"])
             col_type = meta_spec.get("type", "string")
 
             if col_name in col_types:
                 # Check consistency
                 if col_types[col_name] != col_type:
                     raise ValueError(
-                        f"Metadata column '{col_name}' has inconsistent types in config:\n"
+                        f"Property column '{col_name}' has inconsistent types in config:\n"
                         f"  {col_sources[col_name]}: {col_types[col_name]}\n"
                         f"  table '{table_name}': {col_type}\n"
                         f"All instances of the same column must have the same type!"
@@ -125,7 +129,7 @@ def get_meds_schema_from_config(config: Dict) -> Dict[str, type]:
     - text_value: Utf8 (nullable)
     - end: Datetime(us) (nullable)
 
-    Plus all metadata columns from config with consistent types.
+    Plus all property columns from config with consistent types.
 
     This ensures ALL output files have the same schema.
     """
@@ -139,10 +143,10 @@ def get_meds_schema_from_config(config: Dict) -> Dict[str, type]:
         "end": pl.Datetime("us"),  # Optional end time
     }
 
-    # Get metadata column type info from config (validates consistency)
-    col_type_info = get_metadata_column_info(config)
+    # Get property column type info from config (validates consistency)
+    col_type_info = get_property_column_info(config)
 
-    # Add metadata columns to schema with proper types from config
+    # Add property columns to schema with proper types from config
     for col_name, type_str in sorted(col_type_info.items()):
         schema[col_name] = config_type_to_polars(type_str)
 
@@ -290,11 +294,14 @@ def validate_config_against_data(omop_dir: Path, config: Dict, code_mapping_choi
                                     f"Table '{table_name}': {mapping_type} template field '{field}' not found in data"
                                 )
 
-            # Check metadata columns
-            for meta_spec in table_config.get("metadata", []):
-                meta_name = meta_spec.get("name")
-                if meta_name and meta_name not in df_schema.names():
-                    errors.append(f"Table '{table_name}': metadata column '{meta_name}' not found")
+            # Check property columns
+            properties = table_config.get("properties", [])
+            for meta_spec in properties:
+                # Only validate source columns (not literals, which don't read from data)
+                if "literal" not in meta_spec:
+                    meta_name = meta_spec.get("name")
+                    if meta_name and meta_name not in df_schema.names():
+                        errors.append(f"Table '{table_name}': property column '{meta_name}' not found")
 
     if errors:
         print("\n❌ VALIDATION FAILED\n")
@@ -951,12 +958,25 @@ def transform_to_meds_unsorted(
     else:
         base_exprs.append(pl.lit(None, dtype=pl.Datetime("us")).alias("end"))
 
-    # 6. metadata columns (use config_type_to_polars for consistency)
-    for meta_spec in table_config.get("metadata", []):
-        meta_name = meta_spec["name"]
-        meta_type = meta_spec.get("type", "string")
-        meta_polars_type = config_type_to_polars(meta_type)
-        base_exprs.append(pl.col(meta_name).cast(meta_polars_type).alias(meta_name))
+    # 6. Property columns
+    properties = table_config.get("properties", [])
+    for prop_spec in properties:
+        prop_name = prop_spec["name"]
+        prop_type = prop_spec.get("type", "string")
+        prop_polars_type = config_type_to_polars(prop_type)
+
+        # Determine output column name (use alias if provided, else use name)
+        output_name = prop_spec.get("alias", prop_name)
+
+        # Handle different property types:
+        if "literal" in prop_spec:
+            # Literal value (constant across all rows)
+            literal_value = prop_spec["literal"]
+            base_exprs.append(pl.lit(literal_value).cast(prop_polars_type).alias(output_name))
+        else:
+            # Standard column or aliased column
+            # prop_name is the source, output_name is the destination
+            base_exprs.append(pl.col(prop_name).cast(prop_polars_type).alias(output_name))
 
     # Build base DataFrame
     result = df.select(base_exprs)
@@ -1057,7 +1077,7 @@ def process_omop_file_worker(args: Tuple) -> Dict:
             mapping_config = code_mappings[code_mapping_choice]
             # Check if template is used within this mapping
             if isinstance(mapping_config, dict) and "template" in mapping_config:
-                used_mapping = f"{code_mapping_choice}+template"
+                used_mapping = "template"
             else:
                 used_mapping = code_mapping_choice
         else:
@@ -1066,7 +1086,7 @@ def process_omop_file_worker(args: Tuple) -> Dict:
                 if strategy in code_mappings:
                     mapping_config = code_mappings[strategy]
                     if isinstance(mapping_config, dict) and "template" in mapping_config:
-                        used_mapping = f"{strategy}+template"
+                        used_mapping = "template"
                     else:
                         used_mapping = strategy
                     break
@@ -1510,7 +1530,7 @@ def run_omop_to_meds_etl(
     if verbose:
         print("\n📋 Global MEDS schema:")
         print("  Core columns: subject_id, time, code, numeric_value, text_value, end")
-        print(f"  Metadata columns: {len(meds_schema) - 6}")
+        print(f"  Property columns: {len(meds_schema) - 6}")
 
     # Collect all files to process
     tasks = []
@@ -1520,7 +1540,18 @@ def run_omop_to_meds_etl(
         table_name = event_config["table"]
         files = find_omop_table_files(omop_dir, table_name)
 
-        fixed_code = event_config.get("code", f"MEDS_{event_name.upper()}")
+        # Determine if this canonical event has a fixed code or uses code_mappings
+        fixed_code = event_config.get("code")  # None if not specified
+        has_code_mappings = "code_mappings" in event_config
+
+        if not fixed_code and not has_code_mappings:
+            raise ValueError(
+                f"Canonical event '{event_name}' must define either 'code' (for fixed codes) "
+                f"or 'code_mappings' (for template-based codes). Found neither in config."
+            )
+
+        # If using code_mappings (templates), treat like a regular table
+        is_canonical = fixed_code is not None
 
         for file_path in files:
             tasks.append(
@@ -1533,8 +1564,8 @@ def run_omop_to_meds_etl(
                     unsorted_dir,
                     meds_schema,
                     concept_df_data,
-                    True,  # is_canonical
-                    fixed_code,
+                    is_canonical,  # Only True if fixed_code is provided
+                    fixed_code,  # None if using code_mappings
                 )
             )
 
@@ -1643,7 +1674,7 @@ def run_omop_to_meds_etl(
         retention = 100 * stats["output"] / stats["input"] if stats["input"] > 0 else 0
         mapping_used = stats["code_mapping_used"]
         print(
-            f"   {table:25s} [{mapping_used:15s}]  {stats['files']:3d} files  {stats['input']:10,} → {stats['output']:10,} rows ({retention:5.1f}%)"
+            f"   {table:25s} [{mapping_used:12s}]  {stats['files']:3d} files  {stats['input']:10,} → {stats['output']:10,} rows ({retention:5.1f}%)"
         )
 
     if failures:
