@@ -68,15 +68,11 @@ uv pip install meds_etl
 ### Production Installation (with C++ Backend - Linux & macOS)
 
 ```bash
-# Install from PyPI (standard release)
+# Install with C++ backend for maximum performance
 uv pip install meds_etl[cpp]
-
-# Or install latest version with macOS arm64 support
-uv pip install meds_etl
-uv pip install git+https://github.com/VISTA-Stanford/meds_etl_cpp.git@arm64
 ```
 
-**Note:** The C++ backend (`meds_etl_cpp`) is available for Linux and macOS. The [VISTA-Stanford fork](https://github.com/VISTA-Stanford/meds_etl_cpp/tree/arm64) includes native support for macOS arm64 (Apple Silicon) and provides optimized parallel processing using C++17 with Arrow-based columnar data handling. Windows users will automatically use the pure Python fallback.
+**Note:** The C++ backend (`meds_etl_cpp`) is available for Linux and macOS (including Apple Silicon). It provides optimized parallel processing using C++17 with Arrow-based columnar data handling. Windows users will automatically use the pure Python fallback.
 
 ### Development Installation
 
@@ -87,8 +83,8 @@ cd meds_etl
 # Install with uv (recommended)
 uv pip install -e ".[tests]"
 
-# Install C++ backend for maximum performance (Linux & macOS)
-uv pip install git+https://github.com/VISTA-Stanford/meds_etl_cpp.git@arm64
+# Optional: Install C++ backend for maximum performance (Linux & macOS)
+uv pip install -e ".[cpp]"
 ```
 
 ---
@@ -404,8 +400,8 @@ cd meds_etl
 # Install with dev dependencies
 uv pip install -e ".[dev]"
 
-# Install C++ backend (optional, for performance)
-uv pip install git+https://github.com/VISTA-Stanford/meds_etl_cpp.git@arm64
+# Optional: Install C++ backend for performance
+uv pip install -e ".[cpp]"
 
 # Run tests
 uv run python -m pytest -v
