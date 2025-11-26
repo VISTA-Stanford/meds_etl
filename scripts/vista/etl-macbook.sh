@@ -1,17 +1,17 @@
-
 uv run python -m meds_etl.omop_refactor \
-  --omop_dir /Users/jfries/code/vista-data-pipelines/local/som-nero-plevriti-deidbdf.vista_debug_large/ \
+  --omop_dir ../vista-data-pipelines/local/som-nero-plevriti-deidbdf.vista_debug_large/ \
   --output_dir data/meds_omop_refactor/ \
   --config examples/omop_etl_vista_config.json \
-  --workers 8 \
+  --workers 12 \
   --shards 10 \
   --backend cpp \
   --code_mapping concept_id \
-  --verbose
+  --verbose \
+  --force-refresh
 
 
 uv run python -m meds_etl.omop_refactor_streaming \
-  --omop_dir /Users/jfries/code/vista-data-pipelines/local/som-nero-plevriti-deidbdf.vista_debug_large/ \
+  --omop_dir ../vista-data-pipelines/local/som-nero-plevriti-deidbdf.vista_debug_large/ \
   --output_dir data/meds_omop_streams \
   --config omop_etl_vista_config.json \
   --workers 8 \
