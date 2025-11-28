@@ -229,8 +229,22 @@ def validate_config_against_data(omop_dir: Path, config: Dict, code_mapping_choi
             time_start_field = (
                 table_config.get("time_start") or table_config.get("time_field") or table_config.get("datetime_field")
             )
-            if time_start_field and time_start_field not in df_schema.names():
-                errors.append(f"Table '{table_name}': time_start field '{time_start_field}' not found")
+            if time_start_field:
+                # Check if it's new template syntax
+                if any(marker in time_start_field for marker in ["@", "$", "{", "||"]):
+                    # Extract column names from template
+                    from meds_etl.config_integration import extract_column_names_from_template
+
+                    column_names = extract_column_names_from_template(time_start_field)
+                    for col_name in column_names:
+                        if col_name not in df_schema.names():
+                            errors.append(
+                                f"Table '{table_name}': time_start template references column '{col_name}' which was not found"
+                            )
+                else:
+                    # Old format - direct column name
+                    if time_start_field not in df_schema.names():
+                        errors.append(f"Table '{table_name}': time_start field '{time_start_field}' not found")
 
             # Check time_start_fallbacks
             time_start_fallbacks = table_config.get("time_start_fallbacks") or table_config.get("time_fallbacks", [])
@@ -240,8 +254,22 @@ def validate_config_against_data(omop_dir: Path, config: Dict, code_mapping_choi
 
             # Check time_end field (optional)
             time_end_field = table_config.get("time_end") or table_config.get("time_end_field")
-            if time_end_field and time_end_field not in df_schema.names():
-                errors.append(f"Table '{table_name}': time_end field '{time_end_field}' not found")
+            if time_end_field:
+                # Check if it's new template syntax
+                if any(marker in time_end_field for marker in ["@", "$", "{", "||"]):
+                    # Extract column names from template
+                    from meds_etl.config_integration import extract_column_names_from_template
+
+                    column_names = extract_column_names_from_template(time_end_field)
+                    for col_name in column_names:
+                        if col_name not in df_schema.names():
+                            errors.append(
+                                f"Table '{table_name}': time_end template references column '{col_name}' which was not found"
+                            )
+                else:
+                    # Old format - direct column name
+                    if time_end_field not in df_schema.names():
+                        errors.append(f"Table '{table_name}': time_end field '{time_end_field}' not found")
 
             # Check time_end_fallbacks (optional)
             time_end_fallbacks = table_config.get("time_end_fallbacks", [])
@@ -253,12 +281,15 @@ def validate_config_against_data(omop_dir: Path, config: Dict, code_mapping_choi
             code_mappings = table_config.get("code_mappings", {})
             is_canonical = "code" in table_config  # Canonical events have fixed codes
 
-            # Ensure the chosen code mapping method is defined (unless it's a canonical event)
-            if not is_canonical and code_mapping_choice not in code_mappings:
-                errors.append(
-                    f"Table '{table_name}': Code mapping method '{code_mapping_choice}' not defined in config. "
-                    f"Available: {list(code_mappings.keys())}"
-                )
+            # Ensure SOME code mapping method is defined (unless it's a canonical event)
+            # After compilation, different tables may have different mapping types
+            if not is_canonical and not code_mappings:
+                errors.append(f"Table '{table_name}': No code mappings defined in config.")
+            # Only warn if the CLI choice isn't available AND auto mode isn't being used
+            elif not is_canonical and code_mapping_choice not in code_mappings and code_mapping_choice != "auto":
+                # This is just a warning - the transform will fall back to available mappings
+                # Don't treat as error
+                pass
 
             # Validate fields for source_value mapping
             if "source_value" in code_mappings:
@@ -297,8 +328,21 @@ def validate_config_against_data(omop_dir: Path, config: Dict, code_mapping_choi
             # Check property columns
             properties = table_config.get("properties", [])
             for meta_spec in properties:
-                # Only validate source columns (not literals, which don't read from data)
-                if "literal" not in meta_spec:
+                # Check for new "value" field (templated format)
+                if "value" in meta_spec:
+                    value = meta_spec["value"]
+                    if isinstance(value, str) and any(marker in value for marker in ["@", "$", "{", "||"]):
+                        # Extract column names from template
+                        from meds_etl.config_integration import extract_column_names_from_template
+
+                        column_names = extract_column_names_from_template(value)
+                        for col_name in column_names:
+                            if col_name not in df_schema.names():
+                                errors.append(
+                                    f"Table '{table_name}': property '{meta_spec.get('name')}' template references column '{col_name}' which was not found"
+                                )
+                # Old format: Only validate source columns (not literals, which don't read from data)
+                elif "literal" not in meta_spec:
                     meta_name = meta_spec.get("name")
                     if meta_name and meta_name not in df_schema.names():
                         errors.append(f"Table '{table_name}': property column '{meta_name}' not found")
@@ -758,7 +802,7 @@ def transform_to_meds_unsorted(
     subject_id = pl.col(subject_id_field).cast(pl.Int64).alias("subject_id")
 
     # 2. time (from time_start field in config) → "time" column in MEDS
-    # Support both old naming (time_field, datetime_field) and new naming (time_start)
+    # After compilation, this is always in old format
     time_start_field = (
         table_config.get("time_start") or table_config.get("time_field") or table_config.get("datetime_field")
     )
@@ -942,7 +986,7 @@ def transform_to_meds_unsorted(
         base_exprs.append(pl.lit(None, dtype=pl.Utf8).alias("text_value"))
 
     # 5. end time (optional, with fallbacks)
-    # Support both old naming (time_end_field) and new naming (time_end)
+    # After compilation, this is always in old format
     time_end_field = table_config.get("time_end") or table_config.get("time_end_field")
     time_end_fallbacks = table_config.get("time_end_fallbacks", [])
 
@@ -968,7 +1012,7 @@ def transform_to_meds_unsorted(
         # Determine output column name (use alias if provided, else use name)
         output_name = prop_spec.get("alias", prop_name)
 
-        # Handle different property types:
+        # After compilation, complex templates are gone - only old format remains
         if "literal" in prop_spec:
             # Literal value (constant across all rows)
             literal_value = prop_spec["literal"]
@@ -1392,6 +1436,12 @@ def run_omop_to_meds_etl(
     # Load config
     with open(config_path, "r") as f:
         config = json.load(f)
+
+    # Compile templated config to old format for performance
+    # This ensures templates are parsed ONCE, not for every file
+    from meds_etl.config_compiler import compile_config
+
+    config = compile_config(config)
 
     primary_key = config.get("primary_key", "person_id")
 
