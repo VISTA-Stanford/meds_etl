@@ -846,9 +846,13 @@ def apply_transforms(expr: pl.Expr, transforms: list) -> pl.Expr:
         elif transform_type == "split":
             delimiter = transform.get("delimiter", "")
             index = transform.get("index")
+            default = transform.get("default")
             split_expr = expr.str.split(delimiter)
             if index is not None:
                 expr = split_expr.list.get(int(index), null_on_oob=True)
+                # Apply default value if result is null or empty string
+                if default is not None:
+                    expr = pl.when((expr.is_null()) | (expr == "")).then(pl.lit(default)).otherwise(expr)
             else:
                 expr = split_expr
 

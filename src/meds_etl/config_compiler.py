@@ -121,7 +121,11 @@ def parse_template_expression(expr: str) -> Tuple[str, List[Dict[str, str]]]:
             elif func_name == "replace" and len(args) == 2:
                 transforms.append({"type": "replace", "pattern": args[0], "replacement": args[1]})
             elif func_name == "split":
-                if len(args) == 2:
+                if len(args) == 3:
+                    transforms.append(
+                        {"type": "split", "delimiter": args[0], "index": int(args[1]), "default": args[2]}
+                    )
+                elif len(args) == 2:
                     transforms.append({"type": "split", "delimiter": args[0], "index": int(args[1])})
                 elif len(args) == 1:
                     transforms.append({"type": "split", "delimiter": args[0]})
