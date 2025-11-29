@@ -97,7 +97,7 @@
         "visit_detail": {
             "time_start": "@visit_detail_start_datetime || @visit_detail_start_date",
             "time_end": "@visit_detail_end_datetime || @visit_detail_end_date",
-            "code": "$omop:@visit_detail_concept_id || STANFORD_VISIT_DETAIL/{@visit_detail_source_value | split('|', 3, 'Unknown')}",
+            "code": "$omop:@visit_detail_concept_id.concept_name || STANFORD_VISIT_DETAIL/{@visit_detail_source_value | split('|', 3, 'Unknown')}",
             "properties": [
                 {
                     "name": "table",

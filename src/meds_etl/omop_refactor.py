@@ -455,7 +455,20 @@ def build_concept_map(omop_dir: Path, verbose: bool = False) -> Tuple[pl.DataFra
 
     if not concept_files:
         print("⚠️  No concept files found - concept mapping will be unavailable")
-        return pl.DataFrame(schema={"concept_id": pl.Int64, "code": pl.Utf8}), {}
+        return (
+            pl.DataFrame(
+                schema={
+                    "concept_id": pl.Int64,
+                    "code": pl.Utf8,
+                    "concept_code": pl.Utf8,
+                    "concept_name": pl.Utf8,
+                    "vocabulary_id": pl.Utf8,
+                    "domain_id": pl.Utf8,
+                    "concept_class_id": pl.Utf8,
+                }
+            ),
+            {},
+        )
 
     # Load concepts as DataFrames (keep as DF for fast joins!)
     for concept_file in tqdm(concept_files, desc="Loading concepts"):
