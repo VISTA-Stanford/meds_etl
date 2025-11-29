@@ -97,7 +97,7 @@
         "visit_detail": {
             "time_start": "@visit_detail_start_datetime || @visit_detail_start_date",
             "time_end": "@visit_detail_end_datetime || @visit_detail_end_date",
-            "code": "$omop:@visit_detail_concept_id || @visit_detail_source_value",
+            "code": "@visit_detail_source_value",
             "properties": [
                 {
                     "name": "table",

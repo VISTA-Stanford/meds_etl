@@ -201,8 +201,8 @@ class TemplateParser:
         Returns:
             Expression or LiteralValue
         """
-        # Split by pipes (for transforms)
-        parts = self.TRANSFORM_SPLIT.split(s)
+        # Split by pipes (for transforms), respecting quotes and parentheses
+        parts = self._smart_split_pipes(s)
         base_expr_str = parts[0].strip()
         transform_strs = [p.strip() for p in parts[1:]]
 
@@ -217,6 +217,40 @@ class TemplateParser:
             return base_expr
 
         return Expression(expr=base_expr, transforms=transforms)
+
+    def _smart_split_pipes(self, s: str) -> List[str]:
+        """Split on pipes, respecting quotes and parentheses."""
+        parts = []
+        current = ""
+        depth = 0
+        in_quotes = False
+        quote_char = None
+
+        for char in s:
+            if char in ('"', "'") and not in_quotes:
+                in_quotes = True
+                quote_char = char
+                current += char
+            elif char == quote_char and in_quotes:
+                in_quotes = False
+                quote_char = None
+                current += char
+            elif char == "(" and not in_quotes:
+                depth += 1
+                current += char
+            elif char == ")" and not in_quotes:
+                depth -= 1
+                current += char
+            elif char == "|" and not in_quotes and depth == 0:
+                parts.append(current.strip())
+                current = ""
+            else:
+                current += char
+
+        if current.strip():
+            parts.append(current.strip())
+
+        return parts
 
     def _parse_base_expression(self, s: str) -> Union[ColumnRef, VocabLookup, LiteralValue]:
         """
@@ -499,6 +533,17 @@ class PolarsExpressionBuilder:
                 return expr.str.slice(start, length)
             else:
                 raise ValueError(f"substring requires 1 or 2 arguments, got {len(args)}")
+
+        elif func_name == "split":
+            if len(args) == 2:
+                delimiter = args[0]
+                index = int(args[1])
+                return expr.str.split(delimiter).list.get(index, null_on_oob=True)
+            elif len(args) == 1:
+                delimiter = args[0]
+                return expr.str.split(delimiter)
+            else:
+                raise ValueError(f"split requires 1 or 2 arguments, got {len(args)}")
 
         else:
             raise ValueError(f"Unknown transform function: {func_name}")

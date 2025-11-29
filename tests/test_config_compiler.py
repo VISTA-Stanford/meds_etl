@@ -29,8 +29,42 @@ def test_compile_simple_property():
 
     prop = compiled["tables"]["drug_exposure"]["properties"][0]
     assert "value" not in prop
-    assert prop["name"] == "visit_occurrence_id"
-    assert prop["alias"] == "visit_id"
+    assert prop["name"] == "visit_id"
+    assert prop.get("source") == "visit_occurrence_id"
+
+
+def test_compile_property_concept_lookup():
+    """Test compiling property with $omop lookup."""
+    config = {
+        "tables": {
+            "drug_exposure": {
+                "properties": [{"name": "drug_type", "value": "$omop:@drug_type_concept_id", "type": "string"}]
+            }
+        }
+    }
+
+    compiled = compile_config(config)
+
+    prop = compiled["tables"]["drug_exposure"]["properties"][0]
+    assert prop["name"] == "drug_type"
+    assert prop["concept_lookup_field"] == "drug_type_concept_id"
+
+
+def test_compile_property_alias_source():
+    """Test compiling property with alias preserves output name."""
+    config = {
+        "tables": {
+            "visit_occurrence": {
+                "properties": [{"name": "visit_type_label", "value": "@visit_type_concept_id", "type": "string"}]
+            }
+        }
+    }
+
+    compiled = compile_config(config)
+
+    prop = compiled["tables"]["visit_occurrence"]["properties"][0]
+    assert prop["name"] == "visit_type_label"
+    assert prop.get("source") == "visit_type_concept_id"
 
 
 def test_compile_code_fallback_chain():

@@ -11,6 +11,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from meds_etl.config_compiler import compile_config
 from meds_etl.omop_streaming import (
     apply_transforms,
     build_concept_map,
@@ -942,6 +943,48 @@ def test_literal_property():
     assert result["table_name"].unique().to_list() == ["visit_occurrence"]
     assert result["row_number"].unique().to_list() == [42]
     assert len(result) == 3
+
+
+def test_property_concept_lookup():
+    """Test properties that require concept lookups."""
+    config = {
+        "primary_key": "person_id",
+        "tables": {
+            "observation": {
+                "time_start": "@observation_datetime",
+                "code": "@observation_source_value",
+                "properties": [{"name": "drug_type", "value": "$omop:@drug_type_concept_id", "type": "string"}],
+            }
+        },
+    }
+
+    compiled = compile_config(config)
+    table_config = compiled["tables"]["observation"]
+    meds_schema = get_meds_schema_from_config(compiled)
+
+    df = pl.DataFrame(
+        {
+            "person_id": [1, 2],
+            "observation_datetime": [
+                datetime.datetime(2020, 1, 1),
+                datetime.datetime(2020, 1, 2),
+            ],
+            "observation_source_value": ["X", "Y"],
+            "drug_type_concept_id": [111, None],
+        }
+    )
+
+    concept_df = pl.DataFrame({"concept_id": [111], "code": ["DRUG_TYPE_A"]})
+
+    result = transform_to_meds_unsorted(
+        df=df,
+        table_config=table_config,
+        primary_key="person_id",
+        meds_schema=meds_schema,
+        concept_df=concept_df,
+    )
+
+    assert result["drug_type"].to_list() == ["DRUG_TYPE_A", None]
 
 
 def test_aliased_property():

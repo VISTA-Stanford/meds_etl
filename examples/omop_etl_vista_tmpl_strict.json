@@ -97,7 +97,7 @@
         "visit_detail": {
             "time_start": "@visit_detail_start_datetime || @visit_detail_start_date",
             "time_end": "@visit_detail_end_datetime || @visit_detail_end_date",
-            "code": "@visit_detail_source_value",
+            "code": "STANFORD_VISIT_DETAIL/{@visit_detail_source_value | split('|', 3)}",
             "properties": [
                 {
                     "name": "table",
@@ -157,16 +157,6 @@
                     "name": "visit_id",
                     "value": "@visit_occurrence_id",
                     "type": "int"
-                },
-                {
-                    "name": "drug_type",
-                    "value": "$omop:@drug_type_concept_id",
-                    "type": "string"
-                },
-                {
-                    "name": "route",
-                    "value": "$omop:@route_concept_id",
-                    "type": "string"
                 },
                 {
                     "name": "provider_id",
@@ -286,7 +276,7 @@
         },
         "note": {
             "time_start": "@note_datetime || @note_date",
-            "code": "NOTE/{@note_title | regex_replace('\\s+', '-')}",
+            "code": "STANFORD_NOTE/{@note_title | regex_replace('\\s+', '-')}",
             "text_value": "@note_text",
             "properties": [
                 {
@@ -318,7 +308,7 @@
         },
         "image_occurrence": {
             "time_start": "@image_occurrence_date || @image_occurrence_datetime",
-            "code": "IMAGE/{@modality_source_value}|{@anatomic_site_source_value}",
+            "code": "STANFORD_IMAGE/{@modality_source_value}-{@anatomic_site_source_value}",
             "properties": [
                 {
                     "name": "table",
@@ -351,7 +341,7 @@
                     "type": "int"
                 },
                 {
-                    "name": "visit_occurrence_id",
+                    "name": "visit_id",
                     "value": "@visit_occurrence_id",
                     "type": "int"
                 },

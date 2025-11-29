@@ -10,6 +10,54 @@ from typing import Any, Dict, List, Optional, Tuple
 from meds_etl.config_integration import extract_column_names_from_template, is_template_syntax
 
 
+def _smart_split_pipes(s: str) -> List[str]:
+    """Split on pipes while respecting quotes/parentheses (used for transforms)."""
+    parts = []
+    current = ""
+    depth = 0
+    in_quotes = False
+    quote_char = None
+    escaped = False
+
+    for char in s:
+        if escaped:
+            current += char
+            escaped = False
+            continue
+
+        if char == "\\":
+            current += char
+            escaped = True
+            continue
+
+        if char in ('"', "'"):
+            if not in_quotes:
+                in_quotes = True
+                quote_char = char
+            elif char == quote_char:
+                in_quotes = False
+                quote_char = None
+            current += char
+            continue
+
+        if not in_quotes:
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth = max(depth - 1, 0)
+            elif char == "|" and depth == 0:
+                parts.append(current.strip())
+                current = ""
+                continue
+
+        current += char
+
+    if current.strip():
+        parts.append(current.strip())
+
+    return parts
+
+
 def parse_template_expression(expr: str) -> Tuple[str, List[Dict[str, str]]]:
     """
     Parse a template expression and extract column name + transforms.
@@ -25,7 +73,7 @@ def parse_template_expression(expr: str) -> Tuple[str, List[Dict[str, str]]]:
         (column_name, list of transform dicts in old format)
     """
     # Split by pipes to get base and transforms
-    parts = [p.strip() for p in re.split(r"\s*\|\s*", expr)]
+    parts = _smart_split_pipes(expr)
 
     # First part is the column reference
     base = parts[0]
@@ -72,6 +120,11 @@ def parse_template_expression(expr: str) -> Tuple[str, List[Dict[str, str]]]:
                 transforms.append({"type": "regex_replace", "pattern": args[0], "replacement": args[1]})
             elif func_name == "replace" and len(args) == 2:
                 transforms.append({"type": "replace", "pattern": args[0], "replacement": args[1]})
+            elif func_name == "split":
+                if len(args) == 2:
+                    transforms.append({"type": "split", "delimiter": args[0], "index": int(args[1])})
+                elif len(args) == 1:
+                    transforms.append({"type": "split", "delimiter": args[0]})
             elif func_name in ["upper", "lower", "strip", "trim"]:
                 transforms.append({"type": func_name})
 
@@ -120,9 +173,9 @@ def convert_new_template_to_old_with_concept_mapping(template: str) -> Optional[
     for match in re.finditer(r"\$omop:@([a-zA-Z_][a-zA-Z0-9_]*)", template):
         concept_fields.add(match.group(1))
 
-    # Convert template to old format and extract transforms
+    # Convert template to old format and extract transforms per column
     old_template = template
-    all_transforms: List[Dict[str, Any]] = []
+    column_transforms: Dict[str, List[Dict[str, Any]]] = {}  # Map column -> transforms
     template_columns: List[str] = []
 
     # Handle expressions inside braces with transforms: {@col | func()}
@@ -130,7 +183,8 @@ def convert_new_template_to_old_with_concept_mapping(template: str) -> Optional[
         expr = match.group(1)
         # Parse the expression to extract column and transforms
         col_name, transforms = parse_template_expression(expr)
-        all_transforms.extend(transforms)
+        if transforms:
+            column_transforms[col_name] = transforms
         template_columns.append(col_name)
         return "{" + col_name + "}"
 
@@ -148,8 +202,8 @@ def convert_new_template_to_old_with_concept_mapping(template: str) -> Optional[
         main_field = list(concept_fields)[0]
         field_role = infer_field_role(main_field)
         result = {"code_mappings": {"concept_id": {field_role: main_field, "template": old_template}}}
-        if all_transforms:
-            result["code_mappings"]["concept_id"]["transforms"] = all_transforms
+        if column_transforms:
+            result["code_mappings"]["concept_id"]["column_transforms"] = column_transforms
     elif is_template_syntax(template):
         # Determine if template should map via concept_id or source_value
         concept_field = None
@@ -159,12 +213,12 @@ def convert_new_template_to_old_with_concept_mapping(template: str) -> Optional[
                 break
         if concept_field:
             result = {"code_mappings": {"concept_id": {"concept_id_field": concept_field, "template": old_template}}}
-            if all_transforms:
-                result["code_mappings"]["concept_id"]["transforms"] = all_transforms
+            if column_transforms:
+                result["code_mappings"]["concept_id"]["column_transforms"] = column_transforms
         else:
             result = {"code_mappings": {"source_value": {"template": old_template}}}
-            if all_transforms:
-                result["code_mappings"]["source_value"]["transforms"] = all_transforms
+            if column_transforms:
+                result["code_mappings"]["source_value"]["column_transforms"] = column_transforms
     else:
         return None
 
@@ -223,6 +277,12 @@ def convert_code_expression(code: str) -> Optional[Dict[str, Any]]:
         return {"code_mappings": {"concept_id": {infer_field_role(field): field}}}
 
     if code.startswith("@"):
+        if "|" in code:
+            column_name, transforms = parse_template_expression(code)
+            result = {"code_mappings": {"source_value": {"field": column_name}}}
+            if transforms:
+                result["code_mappings"]["source_value"]["transforms"] = transforms
+            return result
         return {"code_mappings": {"source_value": {"field": code[1:]}}}
 
     return None
@@ -330,28 +390,26 @@ def _compile_table_config(table_config: Dict[str, Any]) -> Dict[str, Any]:
             if "value" in new_prop:
                 value = new_prop["value"]
                 if isinstance(value, str):
-                    if is_template_syntax(value):
-                        # Check for $omop:@column pattern
-                        omop_match = re.match(r"^\$omop:@([a-zA-Z_][a-zA-Z0-9_]*)$", value)
-                        original_name = new_prop.get("name")
-                        if omop_match:
-                            # Simple $omop:@column lookup - just use the column directly
-                            # The actual concept lookup will happen via the join
-                            col_name = omop_match.group(1)
-                            del new_prop["value"]
-                            new_prop["name"] = col_name
-                        elif value.startswith("@") and not any(c in value for c in ["||", "$", "{", "|"]):
-                            # Simple @column reference - convert to old format
-                            col_name = value[1:]
-                            del new_prop["value"]
-                            new_prop["name"] = col_name
-                            if original_name and original_name != col_name:
-                                new_prop["alias"] = original_name
-                        # else: complex template, leave as-is for now
-                    else:
+                    omop_match = re.match(r"^\$omop:@([a-zA-Z_][a-zA-Z0-9_]*)$", value)
+                    simple_column = value.startswith("@") and not any(c in value for c in ["||", "$", "{", "}", "|"])
+
+                    if omop_match:
+                        col_name = omop_match.group(1)
+                        new_prop["concept_lookup_field"] = col_name
+                        del new_prop["value"]
+                    elif simple_column:
+                        col_name = value[1:]
+                        new_prop["source"] = col_name
+                        del new_prop["value"]
+                    elif not is_template_syntax(value):
                         # Literal value - convert to old "literal" format
                         new_prop["literal"] = value
                         del new_prop["value"]
+                    # else: complex template - leave as-is
+                else:
+                    # Literal value - convert to old "literal" format
+                    new_prop["literal"] = value
+                    del new_prop["value"]
 
             new_properties.append(new_prop)
         compiled["properties"] = new_properties

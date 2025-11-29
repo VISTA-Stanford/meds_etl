@@ -335,11 +335,28 @@ def validate_config_against_data(omop_dir: Path, config: Dict, verbose: bool = F
                                 errors.append(
                                     f"Table '{table_name}': property/metadata '{meta_spec.get('name')}' template references column '{col_name}' which was not found"
                                 )
-                # Old format: Only validate source columns (not literals)
+                # After compilation: check actual source fields
                 elif "literal" not in meta_spec:
-                    meta_name = meta_spec.get("name")
-                    if meta_name and meta_name not in df_schema.names():
-                        errors.append(f"Table '{table_name}': metadata/property column '{meta_name}' not found")
+                    # Check the actual source column, not the output name
+                    if "concept_lookup_field" in meta_spec:
+                        # Concept lookup - validate the concept_id field exists
+                        source_col = meta_spec["concept_lookup_field"]
+                        if source_col not in df_schema.names():
+                            errors.append(
+                                f"Table '{table_name}': property/metadata '{meta_spec.get('name')}' concept lookup field '{source_col}' not found"
+                            )
+                    elif "source" in meta_spec:
+                        # Simple column alias - validate source exists
+                        source_col = meta_spec["source"]
+                        if source_col not in df_schema.names():
+                            errors.append(
+                                f"Table '{table_name}': property/metadata '{meta_spec.get('name')}' source column '{source_col}' not found"
+                            )
+                    else:
+                        # No source/concept_lookup_field - assume name is the source column (old format)
+                        meta_name = meta_spec.get("name")
+                        if meta_name and meta_name not in df_schema.names():
+                            errors.append(f"Table '{table_name}': metadata/property column '{meta_name}' not found")
 
     if errors:
         print("\n❌ VALIDATION FAILED\n")
@@ -360,6 +377,11 @@ def validate_config_against_data(omop_dir: Path, config: Dict, verbose: bool = F
 
 def table_requires_concept_lookup(table_config: Dict[str, Any]) -> bool:
     """Determine if a table configuration needs concept table lookups."""
+    properties = table_config.get("properties") or table_config.get("metadata", [])
+    for prop in properties:
+        if "concept_lookup_field" in prop:
+            return True
+
     code_mappings = table_config.get("code_mappings", {})
     concept_config = code_mappings.get("concept_id")
     if not concept_config:
@@ -518,6 +540,11 @@ def find_concept_id_columns_for_prescan(table_name: str, config: Dict) -> List[s
     concept_id_config = code_mappings.get("concept_id", {})
 
     if not concept_id_config:
+        properties = table_config.get("properties") or table_config.get("metadata", [])
+        for prop in properties:
+            field = prop.get("concept_lookup_field")
+            if field:
+                columns.append(field)
         return columns
 
     # Get concept_id field
@@ -528,6 +555,12 @@ def find_concept_id_columns_for_prescan(table_name: str, config: Dict) -> List[s
     source_concept_id_field = concept_id_config.get("source_concept_id_field")
     if source_concept_id_field:
         columns.append(source_concept_id_field)
+
+    properties = table_config.get("properties") or table_config.get("metadata", [])
+    for prop in properties:
+        field = prop.get("concept_lookup_field")
+        if field:
+            columns.append(field)
 
     return columns
 
@@ -810,6 +843,15 @@ def apply_transforms(expr: pl.Expr, transforms: list) -> pl.Expr:
             characters = transform.get("characters", "")
             expr = expr.str.strip_chars(characters)
 
+        elif transform_type == "split":
+            delimiter = transform.get("delimiter", "")
+            index = transform.get("index")
+            split_expr = expr.str.split(delimiter)
+            if index is not None:
+                expr = split_expr.list.get(int(index), null_on_oob=True)
+            else:
+                expr = split_expr
+
         else:
             # Unknown transform type - skip
             pass
@@ -817,8 +859,19 @@ def apply_transforms(expr: pl.Expr, transforms: list) -> pl.Expr:
     return expr
 
 
-def build_template_expression(template: str, transforms: Optional[List[Dict[str, Any]]] = None) -> pl.Expr:
-    """Build a Polars expression from a template string with optional transforms."""
+def build_template_expression(
+    template: str,
+    transforms: Optional[List[Dict[str, Any]]] = None,
+    column_transforms: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+) -> pl.Expr:
+    """
+    Build a Polars expression from a template string with optional transforms.
+
+    Args:
+        template: Template string like "PREFIX/{field1}/{field2}"
+        transforms: DEPRECATED - transforms to apply to entire result (kept for backwards compat)
+        column_transforms: Dict mapping column names to their specific transforms
+    """
     import re
 
     parts = re.split(r"(\{[^}]+\})", template)
@@ -827,12 +880,23 @@ def build_template_expression(template: str, transforms: Optional[List[Dict[str,
     for part in parts:
         if part.startswith("{") and part.endswith("}"):
             field = part[1:-1]
-            exprs.append(pl.col(field).cast(pl.Utf8).fill_null(""))
+            col_expr = pl.col(field).cast(pl.Utf8).fill_null("")
+
+            # Apply column-specific transforms if provided
+            if column_transforms and field in column_transforms:
+                col_expr = apply_transforms(col_expr, column_transforms[field])
+
+            exprs.append(col_expr)
         elif part:
             exprs.append(pl.lit(part))
 
     code_expr = pl.concat_str(exprs)
-    return apply_transforms(code_expr, transforms or [])
+
+    # Apply global transforms (for backwards compatibility)
+    if transforms:
+        code_expr = apply_transforms(code_expr, transforms)
+
+    return code_expr
 
 
 def transform_to_meds_unsorted(
@@ -934,7 +998,11 @@ def transform_to_meds_unsorted(
                     df = temp_df
                     base_exprs.append(code_expr.alias(alias))
                 else:
-                    code_expr = build_template_expression(concept_config["template"], concept_config.get("transforms"))
+                    code_expr = build_template_expression(
+                        concept_config["template"],
+                        transforms=concept_config.get("transforms"),
+                        column_transforms=concept_config.get("column_transforms"),
+                    )
                     base_exprs.append(code_expr.alias(alias))
 
                 code_candidates.append(alias)
@@ -979,7 +1047,9 @@ def transform_to_meds_unsorted(
 
             if "template" in source_value_config:
                 code_expr = build_template_expression(
-                    source_value_config["template"], source_value_config.get("transforms")
+                    source_value_config["template"],
+                    transforms=source_value_config.get("transforms"),
+                    column_transforms=source_value_config.get("column_transforms"),
                 )
                 base_exprs.append(code_expr.alias(alias))
             elif "field" in source_value_config:
@@ -1026,9 +1096,12 @@ def transform_to_meds_unsorted(
 
     # 6. Property columns (support both "properties" and "metadata" for backwards compat)
     properties = table_config.get("properties") or table_config.get("metadata", [])
+    concept_property_requests: List[Dict[str, Any]] = []
 
     for prop_spec in properties:
-        prop_name = prop_spec["name"]  # Source column name (from OMOP)
+        prop_name = prop_spec.get("name")  # Output column name
+        if prop_name is None:
+            continue
         prop_type = prop_spec.get("type", "string")
         prop_polars_type = config_type_to_polars(prop_type)
 
@@ -1040,10 +1113,23 @@ def transform_to_meds_unsorted(
             # Literal value (constant for all rows)
             literal_value = prop_spec["literal"]
             base_exprs.append(pl.lit(literal_value).cast(prop_polars_type).alias(output_name))
+        elif "concept_lookup_field" in prop_spec:
+            concept_field = prop_spec["concept_lookup_field"]
+            temp_col = f"__prop_concept_id_{len(concept_property_requests)}"
+            temp_alias = f"__prop_concept_code_{len(concept_property_requests)}"
+            base_exprs.append(pl.col(concept_field).cast(pl.Int64).alias(temp_col))
+            concept_property_requests.append(
+                {
+                    "concept_col": temp_col,
+                    "code_alias": temp_alias,
+                    "output_name": output_name,
+                    "type": prop_polars_type,
+                }
+            )
         else:
             # Standard column or aliased column
-            # prop_name is the source, output_name is the destination
-            base_exprs.append(pl.col(prop_name).cast(prop_polars_type).alias(output_name))
+            source_field = prop_spec.get("source", prop_name)
+            base_exprs.append(pl.col(source_field).cast(prop_polars_type).alias(output_name))
 
     # Build base DataFrame
     result = df.select(base_exprs)
@@ -1053,6 +1139,27 @@ def transform_to_meds_unsorted(
         join_alias = concept_join_alias or "code"
         join_df = concept_df.rename({"code": join_alias})
         result = result.join(join_df, on="concept_id", how="left").drop("concept_id")
+
+    if concept_property_requests:
+        if concept_df is None or len(concept_df) == 0:
+            raise ValueError("Property concept lookup requested but concept_df not provided")
+        for req in concept_property_requests:
+            concept_col = req["concept_col"]
+            code_alias = req["code_alias"]
+            output_name = req["output_name"]
+            prop_type = req["type"]
+
+            join_df = concept_df.rename({"code": code_alias})
+            result = result.join(join_df, left_on=concept_col, right_on="concept_id", how="left")
+
+            if concept_col in result.columns:
+                result = result.drop(concept_col)
+            if "concept_id" in result.columns:
+                result = result.drop("concept_id")
+
+            if code_alias in result.columns:
+                result = result.rename({code_alias: output_name})
+            result = result.with_columns(pl.col(output_name).cast(prop_type))
 
     # Combine candidate code columns, respecting fallback order
     if not code_is_fixed:
