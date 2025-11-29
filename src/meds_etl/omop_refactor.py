@@ -462,10 +462,15 @@ def build_concept_map(omop_dir: Path, verbose: bool = False) -> Tuple[pl.DataFra
         df = pl.read_parquet(concept_file)
 
         # Build DataFrame with concept_id -> code mapping
+        # Include all commonly used concept fields for flexible access
         concept_df = df.select(
             concept_id=pl.col("concept_id").cast(pl.Int64),
             code=pl.col("vocabulary_id") + "/" + pl.col("concept_code"),
-            name=pl.col("concept_name"),
+            concept_code=pl.col("concept_code"),
+            concept_name=pl.col("concept_name"),
+            vocabulary_id=pl.col("vocabulary_id"),
+            domain_id=pl.col("domain_id"),
+            concept_class_id=pl.col("concept_class_id"),
         )
 
         concept_dfs.append(concept_df)
@@ -475,7 +480,7 @@ def build_concept_map(omop_dir: Path, verbose: bool = False) -> Tuple[pl.DataFra
         for row in custom_df.iter_rows(named=True):
             code_metadata[row["code"]] = {
                 "code": row["code"],
-                "description": row["name"],
+                "description": row["concept_name"],
                 "parent_codes": [],
             }
 
@@ -952,6 +957,7 @@ def transform_to_meds_unsorted(
     code_candidates: List[str] = []
     needs_concept_join = False
     concept_join_alias = None
+    concept_join_field = "code"  # Which field from concept table to use
     code_is_fixed = False
 
     if fixed_code:
@@ -990,6 +996,9 @@ def transform_to_meds_unsorted(
 
                 needs_concept_join = True
                 concept_join_alias = "code_concept_lookup"
+                concept_join_field = concept_config.get(
+                    "concept_field", "code"
+                )  # Default to "code" (vocab/code format)
                 code_candidates.append(concept_join_alias)
 
                 exprs_to_coalesce: List[pl.Expr] = []
@@ -1103,7 +1112,8 @@ def transform_to_meds_unsorted(
     # Perform concept join if needed (FAST!)
     if needs_concept_join:
         join_alias = concept_join_alias or "code"
-        join_df = concept_df.rename({"code": join_alias})
+        # Rename the specified concept field to the join alias
+        join_df = concept_df.rename({concept_join_field: join_alias})
         result = result.join(join_df, on="concept_id", how="left").drop("concept_id")
 
     # Perform concept lookups for properties

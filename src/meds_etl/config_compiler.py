@@ -164,7 +164,7 @@ def convert_new_template_to_old_with_concept_mapping(template: str) -> Optional[
     """
     # Check if this is a simple field reference (not a template)
     # Simple field references should be handled by the simple parser in convert_code_expression
-    if re.fullmatch(r"\$omop:@[a-zA-Z_][a-zA-Z0-9_]*", template):
+    if re.fullmatch(r"\$omop:@[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)?", template):
         return None  # Let simple parser handle it
     if re.fullmatch(r"@[a-zA-Z_][a-zA-Z0-9_]*", template):
         return None  # Let simple parser handle it
@@ -172,10 +172,15 @@ def convert_new_template_to_old_with_concept_mapping(template: str) -> Optional[
     # Check if template has $omop: lookups
     has_omop = "$omop:" in template
 
-    # Extract concept_id fields from $omop:@field patterns
+    # Extract concept_id fields from $omop:@field(.property)? patterns
     concept_fields = set()
-    for match in re.finditer(r"\$omop:@([a-zA-Z_][a-zA-Z0-9_]*)", template):
-        concept_fields.add(match.group(1))
+    concept_field_selectors = {}  # Map field -> property selector
+    for match in re.finditer(r"\$omop:@([a-zA-Z_][a-zA-Z0-9_]*)(?:\.([a-zA-Z_][a-zA-Z0-9_]*))?", template):
+        field_name = match.group(1)
+        field_selector = match.group(2)  # Optional, e.g., "concept_name"
+        concept_fields.add(field_name)
+        if field_selector:
+            concept_field_selectors[field_name] = field_selector
 
     # Convert template to old format and extract transforms per column
     old_template = template
@@ -195,8 +200,8 @@ def convert_new_template_to_old_with_concept_mapping(template: str) -> Optional[
     # Replace {@...} patterns
     old_template = re.sub(r"\{(@[^}]+)\}", replace_braced_expr, old_template)
 
-    # Replace $omop:@field with {field} (inside or outside braces)
-    old_template = re.sub(r"\$omop:@([a-zA-Z_][a-zA-Z0-9_]*)", r"{\1}", old_template)
+    # Replace $omop:@field(.property)? with {field} (inside or outside braces)
+    old_template = re.sub(r"\$omop:@([a-zA-Z_][a-zA-Z0-9_]*)(?:\.[a-zA-Z_][a-zA-Z0-9_]*)?", r"{\1}", old_template)
     # Already in braces: {$omop:@field} → {{field}} → {field}
     old_template = re.sub(r"\{\{([^}]+)\}\}", r"{\1}", old_template)
 
@@ -208,6 +213,9 @@ def convert_new_template_to_old_with_concept_mapping(template: str) -> Optional[
         result = {"code_mappings": {"concept_id": {field_role: main_field, "template": old_template}}}
         if column_transforms:
             result["code_mappings"]["concept_id"]["column_transforms"] = column_transforms
+        # Add field selector if specified
+        if main_field in concept_field_selectors:
+            result["code_mappings"]["concept_id"]["concept_field"] = concept_field_selectors[main_field]
     elif is_template_syntax(template):
         # Determine if template should map via concept_id or source_value
         concept_field = None
@@ -242,6 +250,7 @@ def convert_code_expression(code: str) -> Optional[Dict[str, Any]]:
     """
     Convert code expression with fallbacks into standard code_mappings.
     Supports expressions like "$omop:@source || $omop:@concept || @source_value".
+    Also supports field selectors like "$omop:@field.concept_name".
     """
     parts = [part.strip() for part in code.split("||")]
     if len(parts) > 1:
@@ -250,10 +259,15 @@ def convert_code_expression(code: str) -> Optional[Dict[str, Any]]:
         for part in parts:
             # Remove surrounding parentheses if present
             expr = part.strip()
-            if expr.startswith("$omop:@"):
-                field = expr[len("$omop:@") :]
+            # Check for $omop:@field.property pattern
+            omop_match = re.match(r"\$omop:@([a-zA-Z_][a-zA-Z0-9_]*)(?:\.([a-zA-Z_][a-zA-Z0-9_]*))?$", expr)
+            if omop_match:
+                field = omop_match.group(1)
+                field_selector = omop_match.group(2)
                 role = infer_field_role(field)
                 concept_config[role] = field
+                if field_selector:
+                    concept_config["concept_field"] = field_selector
             elif expr.startswith("$omop:"):
                 # Literal fallback concept id
                 try:
@@ -276,9 +290,15 @@ def convert_code_expression(code: str) -> Optional[Dict[str, Any]]:
     if conversion:
         return conversion
 
-    if code.startswith("$omop:@"):
-        field = code[len("$omop:@") :]
-        return {"code_mappings": {"concept_id": {infer_field_role(field): field}}}
+    # Check for simple $omop:@field(.property)? pattern
+    omop_match = re.match(r"\$omop:@([a-zA-Z_][a-zA-Z0-9_]*)(?:\.([a-zA-Z_][a-zA-Z0-9_]*))?$", code)
+    if omop_match:
+        field = omop_match.group(1)
+        field_selector = omop_match.group(2)
+        result = {"code_mappings": {"concept_id": {infer_field_role(field): field}}}
+        if field_selector:
+            result["code_mappings"]["concept_id"]["concept_field"] = field_selector
+        return result
 
     if code.startswith("@"):
         if "|" in code:

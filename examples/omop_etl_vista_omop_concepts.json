@@ -70,7 +70,7 @@
         "visit_occurrence": {
             "time_start": "@visit_start_datetime || @visit_start_date",
             "time_end": "@visit_end_datetime || @visit_end_date",
-            "code": "$omop:@visit_source_concept_id",
+            "code": "$omop:@visit_concept_id || @visit_source_value",
             "properties": [
                 {
                     "name": "table",
@@ -97,7 +97,7 @@
         "visit_detail": {
             "time_start": "@visit_detail_start_datetime || @visit_detail_start_date",
             "time_end": "@visit_detail_end_datetime || @visit_detail_end_date",
-            "code": "STANFORD_VISIT_DETAIL/{@visit_detail_source_value | split('|', 3, 'Unknown')}",
+            "code": "$omop:@visit_detail_concept_id || STANFORD_VISIT_DETAIL/{@visit_detail_source_value | split('|', 3, 'Unknown')}",
             "properties": [
                 {
                     "name": "table",
@@ -199,11 +199,21 @@
         "device_exposure": {
             "time_start": "@device_exposure_start_datetime || @device_exposure_start_date",
             "time_end": "@device_exposure_end_datetime || @device_exposure_end_date",
-            "code": "$omop:@device_source_concept_id",
+            "code": "$omop:@device_concept_id",
             "properties": [
                 {
                     "name": "table",
                     "value": "device_exposure",
+                    "type": "string"
+                },
+                {
+                    "name": "source_code",
+                    "value": "$omop:@device_source_concept_id",
+                    "type": "string"
+                },
+                {
+                    "name": "source_value",
+                    "value": "@device_source_value",
                     "type": "string"
                 },
                 {
