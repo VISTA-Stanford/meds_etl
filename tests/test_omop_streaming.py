@@ -624,13 +624,15 @@ def test_build_concept_map_basic():
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
 
-        # Create sample concept table
+        # Create sample concept table (includes all columns expected by build_concept_map)
         concept_df = pl.DataFrame(
             {
                 "concept_id": [3004410, 3000963, 2000000001],
                 "vocabulary_id": ["LOINC", "LOINC", "Custom"],
                 "concept_code": ["8310-5", "8867-4", "C001"],
                 "concept_name": ["Body temperature", "Heart rate", "Custom concept"],
+                "domain_id": ["Measurement", "Measurement", "Measurement"],
+                "concept_class_id": ["Clinical Observation", "Clinical Observation", "Clinical Observation"],
             }
         )
 

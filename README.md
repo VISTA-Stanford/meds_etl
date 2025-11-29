@@ -65,14 +65,26 @@ pip install uv
 uv pip install meds_etl
 ```
 
-### Production Installation (with C++ Backend - Linux & macOS)
+### Production Installation (with C++ Backend)
 
 ```bash
 # Install with C++ backend for maximum performance
 uv pip install meds_etl[cpp]
 ```
 
-**Note:** The C++ backend (`meds_etl_cpp`) is available for Linux and macOS (including Apple Silicon). It provides optimized parallel processing using C++17 with Arrow-based columnar data handling. Windows users will automatically use the pure Python fallback.
+**Platform Notes:**
+
+| Platform | Install Method | Notes |
+|----------|---------------|-------|
+| **Linux** | Pre-built wheels from PyPI | Fast (~10s) |
+| **macOS (Apple Silicon)** | Builds from source | Requires Xcode Command Line Tools (~2 min first install) |
+| **macOS (Intel)** | Builds from source | Requires Xcode Command Line Tools |
+| **Windows** | Not available | Uses Python fallback automatically |
+
+**macOS Users:** If you haven't installed Xcode Command Line Tools:
+```bash
+xcode-select --install
+```
 
 ### Development Installation
 

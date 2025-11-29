@@ -12,8 +12,14 @@ from typing import Dict, List, Mapping, Tuple
 
 import meds
 import polars as pl
+import pyarrow.fs
 import pyarrow.parquet as pq
 from tqdm import tqdm
+
+# Initialize PyArrow's LocalFileSystem early to avoid conflicts with meds_etl_cpp
+# which bundles its own Arrow library. Without this, PyArrow 20.0.0+ fails when
+# trying to register the 'file' scheme after meds_etl_cpp has already done so.
+_LOCAL_FS = pyarrow.fs.LocalFileSystem()
 
 mp = multiprocessing.get_context("forkserver")
 if mp is None:
@@ -257,7 +263,7 @@ def sort_polars(
         # All the large_lists are now converted to lists
         casted = converted.cast(desired_schema)
 
-        pq.write_table(casted, os.path.join(data_dir, f"data_{shard_index}.parquet"))
+        pq.write_table(casted, os.path.join(data_dir, f"data_{shard_index}.parquet"), filesystem=_LOCAL_FS)
 
     shutil.rmtree(temp_dir)
 

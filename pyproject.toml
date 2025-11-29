@@ -26,7 +26,10 @@ benchmarking = [
   "pandas >= 2.0",
 ]
 cpp = [
-  "meds_etl_cpp == 0.3.4",
+  # Linux: Use pre-built PyPI wheels (fast install)
+  "meds_etl_cpp == 0.3.4; sys_platform == 'linux'",
+  # macOS: Build from VISTA fork with arm64/Apple Silicon support
+  "meds_etl_cpp @ git+https://github.com/VISTA-Stanford/meds_etl_cpp.git@arm64 ; sys_platform == 'darwin'",
 ]
 dev = [
   "pytest >= 9.0",

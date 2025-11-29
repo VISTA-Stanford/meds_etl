@@ -12,13 +12,18 @@ from typing import List, Set
 import jsonschema
 import meds
 import pyarrow as pa
+import pyarrow.fs
 import pyarrow.parquet as pq
 import pytest
 
-import meds_etl.unsorted
+# IMPORTANT: Initialize PyArrow's LocalFileSystem BEFORE importing meds_etl_cpp
+# to avoid Arrow filesystem registry conflicts with PyArrow 20.0.0+
+_LOCAL_FS = pyarrow.fs.LocalFileSystem()
+
+import meds_etl.unsorted  # noqa: E402
 
 try:
-    import meds_etl_cpp
+    import meds_etl_cpp  # noqa: E402
 except ImportError:
     meds_etl_cpp = None
 
@@ -91,7 +96,7 @@ def create_dataset(tmp_path: pathlib.Path, include_properties=True):
 
     subject_table = pa.Table.from_pylist(subjects, subject_schema)
 
-    pq.write_table(subject_table, tmp_path / "data" / "subjects.parquet")
+    pq.write_table(subject_table, tmp_path / "data" / "subjects.parquet", filesystem=_LOCAL_FS)
 
     metadata = {
         "dataset_name": "synthetic datata",
@@ -179,7 +184,9 @@ def test_shuffle_polars(tmp_path: pathlib.Path):
     for a in range(num_parts):
         i = indices[a * rows_per_part : (a + 1) * rows_per_part]
         shuffled_subjects = subjects.take(i)
-        pq.write_table(shuffled_subjects, meds_flat_dataset / "unsorted_data" / (str(a) + ".parquet"))
+        pq.write_table(
+            shuffled_subjects, meds_flat_dataset / "unsorted_data" / (str(a) + ".parquet"), filesystem=_LOCAL_FS
+        )
 
     meds_dataset2 = tmp_path / "meds2"
 
@@ -228,7 +235,9 @@ def test_shuffle_cpp(tmp_path: pathlib.Path):
     for a in range(num_parts):
         i = indices[a * rows_per_part : (a + 1) * rows_per_part]
         shuffled_subjects = subjects.take(i)
-        pq.write_table(shuffled_subjects, meds_flat_dataset / "unsorted_data" / (str(a) + ".parquet"))
+        pq.write_table(
+            shuffled_subjects, meds_flat_dataset / "unsorted_data" / (str(a) + ".parquet"), filesystem=_LOCAL_FS
+        )
 
     meds_dataset2 = tmp_path / "meds2"
 
