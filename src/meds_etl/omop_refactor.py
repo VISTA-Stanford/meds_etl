@@ -1126,6 +1126,14 @@ def transform_to_meds_unsorted(
     if needs_concept_join:
         join_alias = concept_join_alias or "code"
         # Rename the specified concept field to the join alias
+        # Check if the field exists in concept_df
+        if concept_join_field not in concept_df.columns:
+            raise ValueError(
+                f"Concept field '{concept_join_field}' not found in concept DataFrame. "
+                f"Available columns: {concept_df.columns}. "
+                f"This might indicate that your concept files don't have the standard OMOP CDM schema, "
+                f"or the concept DataFrame wasn't loaded correctly."
+            )
         join_df = concept_df.rename({concept_join_field: join_alias})
         result = result.join(join_df, on="concept_id", how="left").drop("concept_id")
 
