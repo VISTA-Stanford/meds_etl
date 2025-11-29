@@ -249,7 +249,7 @@ Create hierarchical, structured codes using templates:
 }
 ```
 
-Run with `--code_mapping concept_id` or `--code_mapping source_value`
+The config controls the fallback order automatically for each table and fallback chain.
 
 ---
 
@@ -265,7 +265,6 @@ uv run python -m meds_etl.omop_refactor \
   --workers 8                  # Parallel workers
   --shards 100                 # Number of output shards
   --backend auto               # auto/cpp/polars (default: auto)
-  --code_mapping auto          # auto/concept_id/source_value
   --verbose                    # Detailed logging
 ```
 

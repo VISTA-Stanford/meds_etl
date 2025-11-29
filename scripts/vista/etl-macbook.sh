@@ -5,7 +5,6 @@ uv run python -m meds_etl.omop_refactor \
   --workers 12 \
   --shards 10 \
   --backend cpp \
-  --code_mapping concept_id \
   --verbose \
   --force-refresh
 

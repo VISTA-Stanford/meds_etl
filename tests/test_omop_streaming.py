@@ -240,7 +240,6 @@ def test_transform_to_meds_fixed_code():
         df=df,
         table_config=table_config,
         primary_key="person_id",
-        code_mapping_choice="auto",
         meds_schema=meds_schema,
         fixed_code="MEDS_BIRTH",
     )
@@ -281,7 +280,6 @@ def test_transform_to_meds_source_value_field():
         df=df,
         table_config=table_config,
         primary_key="person_id",
-        code_mapping_choice="source_value",
         meds_schema=meds_schema,
     )
 
@@ -325,7 +323,6 @@ def test_transform_to_meds_template():
         df=df,
         table_config=table_config,
         primary_key="person_id",
-        code_mapping_choice="concept_id",
         meds_schema=meds_schema,
     )
 
@@ -373,7 +370,6 @@ def test_transform_to_meds_concept_join():
         df=df,
         table_config=table_config,
         primary_key="person_id",
-        code_mapping_choice="concept_id",
         meds_schema=meds_schema,
         concept_df=concept_df,
     )
@@ -424,7 +420,6 @@ def test_transform_to_meds_with_end_time():
         df=df,
         table_config=table_config,
         primary_key="person_id",
-        code_mapping_choice="concept_id",
         meds_schema=meds_schema,
         concept_df=concept_df,
     )
@@ -475,7 +470,6 @@ def test_transform_to_meds_filters_null_codes():
         df=df,
         table_config=table_config,
         primary_key="person_id",
-        code_mapping_choice="concept_id",
         meds_schema=meds_schema,
         concept_df=concept_df,
     )
@@ -576,7 +570,7 @@ def test_validate_config_against_data_success():
         }
 
         # Should not raise
-        validate_config_against_data(tmpdir_path, config, "concept_id", verbose=False)
+        validate_config_against_data(tmpdir_path, config, verbose=False)
 
 
 def test_validate_config_against_data_missing_field():
@@ -616,7 +610,7 @@ def test_validate_config_against_data_missing_field():
         }
 
         with pytest.raises(SystemExit):
-            validate_config_against_data(tmpdir_path, config, "concept_id", verbose=False)
+            validate_config_against_data(tmpdir_path, config, verbose=False)
 
 
 # ============================================================================
@@ -732,7 +726,6 @@ def test_process_omop_file_worker_success():
             "measurement",
             table_config,
             "person_id",
-            "concept_id",
             output_dir,
             meds_schema,
             pickle.dumps(concept_df),
@@ -795,7 +788,6 @@ def test_process_omop_file_worker_empty_file():
             "measurement",
             table_config,
             "person_id",
-            "concept_id",
             output_dir,
             meds_schema,
             pickle.dumps(None),
@@ -863,7 +855,6 @@ def test_end_to_end_simple_measurement():
         df=df,
         table_config=table_config,
         primary_key="person_id",
-        code_mapping_choice="concept_id",
         meds_schema=meds_schema,
         concept_df=concept_df,
     )
@@ -943,7 +934,6 @@ def test_literal_property():
         df=df,
         table_config=table_config,
         primary_key="person_id",
-        code_mapping_choice="concept_id",
         meds_schema=meds_schema,
         concept_df=concept_df,
     )
@@ -1002,7 +992,6 @@ def test_aliased_property():
         df=df,
         table_config=table_config,
         primary_key="person_id",
-        code_mapping_choice="concept_id",
         meds_schema=meds_schema,
         concept_df=concept_df,
     )
@@ -1059,7 +1048,6 @@ def test_concept_mapped_template():
         df=df,
         table_config=table_config,
         primary_key="person_id",
-        code_mapping_choice="concept_id",
         meds_schema=meds_schema,
         concept_df=concept_df,
     )

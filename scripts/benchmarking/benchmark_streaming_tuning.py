@@ -396,7 +396,6 @@ def main():
         "workers": baseline_workers,
         "shards": args.baseline_shards,
         "chunk_rows": args.baseline_chunk_rows,
-        "code_mapping": "auto",
         "run_compression": "lz4",
         "final_compression": "zstd",
         "merge_workers": 0,  # auto

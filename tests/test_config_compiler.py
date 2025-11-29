@@ -89,5 +89,51 @@ def test_compile_preserves_old_format():
     assert compiled["tables"]["drug_exposure"]["properties"][0]["name"] == "visit_occurrence_id"
 
 
+def test_compile_simple_omop_field_reference():
+    """Test that simple $omop:@field references don't create templates."""
+    config = {"tables": {"observation": {"code": "$omop:@observation_source_concept_id"}}}
+
+    compiled = compile_config(config)
+    code_mappings = compiled["tables"]["observation"]["code_mappings"]
+
+    # Should create concept_id mapping without template
+    assert "concept_id" in code_mappings
+    concept_cfg = code_mappings["concept_id"]
+    assert concept_cfg["source_concept_id_field"] == "observation_source_concept_id"
+    # Crucially: no template key should be present
+    assert "template" not in concept_cfg
+
+
+def test_compile_simple_source_value_reference():
+    """Test that simple @field references don't create templates."""
+    config = {"tables": {"note": {"code": "@note_title"}}}
+
+    compiled = compile_config(config)
+    code_mappings = compiled["tables"]["note"]["code_mappings"]
+
+    # Should create source_value mapping without template
+    assert "source_value" in code_mappings
+    source_cfg = code_mappings["source_value"]
+    assert source_cfg["field"] == "note_title"
+    # Crucially: no template key should be present
+    assert "template" not in source_cfg
+
+
+def test_compile_template_with_omop_field():
+    """Test that actual templates with $omop:@field DO create template key."""
+    config = {"tables": {"person": {"code": "Gender/{$omop:@gender_concept_id}"}}}
+
+    compiled = compile_config(config)
+    code_mappings = compiled["tables"]["person"]["code_mappings"]
+
+    # Should create concept_id mapping WITH template
+    assert "concept_id" in code_mappings
+    concept_cfg = code_mappings["concept_id"]
+    assert concept_cfg["concept_id_field"] == "gender_concept_id"
+    # Template key SHOULD be present for actual templates
+    assert "template" in concept_cfg
+    assert concept_cfg["template"] == "Gender/{gender_concept_id}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

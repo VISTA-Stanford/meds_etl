@@ -105,6 +105,13 @@ def convert_new_template_to_old_with_concept_mapping(template: str) -> Optional[
 
     Returns dict with code_mappings if conversion successful, else None.
     """
+    # Check if this is a simple field reference (not a template)
+    # Simple field references should be handled by the simple parser in convert_code_expression
+    if re.fullmatch(r"\$omop:@[a-zA-Z_][a-zA-Z0-9_]*", template):
+        return None  # Let simple parser handle it
+    if re.fullmatch(r"@[a-zA-Z_][a-zA-Z0-9_]*", template):
+        return None  # Let simple parser handle it
+
     # Check if template has $omop: lookups
     has_omop = "$omop:" in template
 
@@ -139,7 +146,8 @@ def convert_new_template_to_old_with_concept_mapping(template: str) -> Optional[
     if has_omop and concept_fields:
         # Use concept_id mapping
         main_field = list(concept_fields)[0]
-        result = {"code_mappings": {"concept_id": {"concept_id_field": main_field, "template": old_template}}}
+        field_role = infer_field_role(main_field)
+        result = {"code_mappings": {"concept_id": {field_role: main_field, "template": old_template}}}
         if all_transforms:
             result["code_mappings"]["concept_id"]["transforms"] = all_transforms
     elif is_template_syntax(template):

@@ -283,8 +283,6 @@ def main():
                 str(args.num_workers),
                 "--backend",
                 backend_arg,
-                "--code_mapping",
-                "auto",
                 "--process_method",
                 "spawn",  # Force spawn for Linux stability
                 "--force-refresh",  # Always overwrite for benchmarking

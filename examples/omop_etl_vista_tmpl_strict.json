@@ -1,0 +1,381 @@
+{
+    "omop_cdm_version": "5.3.1",
+    "primary_key": "person_id",
+    "canonical_events": {
+        "birth": {
+            "table": "person",
+            "code": "MEDS_BIRTH",
+            "time_start": "@birth_datetime",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "person",
+                    "type": "string"
+                }
+            ]
+        },
+        "gender": {
+            "table": "person",
+            "code": "Gender/{@gender_concept_id}",
+            "time_start": "@birth_datetime",
+            "text_value": "$omop:@gender_concept_id",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "person",
+                    "type": "string"
+                }
+            ]
+        },
+        "race": {
+            "table": "person",
+            "code": "Race/{@race_concept_id}",
+            "time_start": "@birth_datetime",
+            "text_value": "$omop:@race_concept_id",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "person",
+                    "type": "string"
+                }
+            ]
+        },
+        "ethnicity": {
+            "table": "person",
+            "code": "Ethnicity/{@ethnicity_concept_id}",
+            "time_start": "@birth_datetime",
+            "text_value": "$omop:@ethnicity_concept_id",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "person",
+                    "type": "string"
+                }
+            ]
+        },
+        "death": {
+            "code": "MEDS_DEATH",
+            "time_start": "@death_datetime || @death_date",
+            "table": "death",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "death",
+                    "type": "string"
+                }
+            ]
+        }
+    },
+    "tables": {
+        "visit_occurrence": {
+            "time_start": "@visit_start_datetime || @visit_start_date",
+            "time_end": "@visit_end_datetime || @visit_end_date",
+            "code": "$omop:@visit_source_concept_id",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "visit_occurrence",
+                    "type": "string"
+                },
+                {
+                    "name": "visit_id",
+                    "value": "@visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "provider_id",
+                    "value": "@provider_id",
+                    "type": "int"
+                },
+                {
+                    "name": "care_site_id",
+                    "value": "@care_site_id",
+                    "type": "int"
+                }
+            ]
+        },
+        "visit_detail": {
+            "time_start": "@visit_detail_start_datetime || @visit_detail_start_date",
+            "time_end": "@visit_detail_end_datetime || @visit_detail_end_date",
+            "code": "@visit_detail_source_value",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "visit_detail",
+                    "type": "string"
+                },
+                {
+                    "name": "visit_id",
+                    "value": "@visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "provider_id",
+                    "value": "@provider_id",
+                    "type": "int"
+                },
+                {
+                    "name": "care_site_id",
+                    "value": "@care_site_id",
+                    "type": "int"
+                }
+            ]
+        },
+        "condition_occurrence": {
+            "time_start": "@condition_start_datetime || @condition_start_date",
+            "time_end": "@condition_end_datetime || @condition_end_date",
+            "code": "$omop:@condition_source_concept_id",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "condition_occurrence",
+                    "type": "string"
+                },
+                {
+                    "name": "visit_id",
+                    "value": "@visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "provider_id",
+                    "value": "@provider_id",
+                    "type": "int"
+                }
+            ]
+        },
+        "drug_exposure": {
+            "time_start": "@drug_exposure_start_datetime || @drug_exposure_start_date",
+            "time_end": "@drug_exposure_end_datetime || @drug_exposure_end_date",
+            "code": "$omop:@drug_source_concept_id",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "drug_exposure",
+                    "type": "string"
+                },
+                {
+                    "name": "visit_id",
+                    "value": "@visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "drug_type",
+                    "value": "$omop:@drug_type_concept_id",
+                    "type": "string"
+                },
+                {
+                    "name": "route",
+                    "value": "$omop:@route_concept_id",
+                    "type": "string"
+                },
+                {
+                    "name": "provider_id",
+                    "value": "@provider_id",
+                    "type": "int"
+                }
+            ]
+        },
+        "procedure_occurrence": {
+            "time_start": "@procedure_datetime || @procedure_date",
+            "code": "$omop:@procedure_source_concept_id",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "procedure_occurrence",
+                    "type": "string"
+                },
+                {
+                    "name": "procedure_occurrence_id",
+                    "value": "@procedure_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_id",
+                    "value": "@visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_detail_id",
+                    "value": "@visit_detail_id",
+                    "type": "int"
+                },
+                {
+                    "name": "provider_id",
+                    "value": "@provider_id",
+                    "type": "int"
+                }
+            ]
+        },
+        "device_exposure": {
+            "time_start": "@device_exposure_start_datetime || @device_exposure_start_date",
+            "time_end": "@device_exposure_end_datetime || @device_exposure_end_date",
+            "code": "$omop:@device_source_concept_id",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "device_exposure",
+                    "type": "string"
+                },
+                {
+                    "name": "visit_id",
+                    "value": "@visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "quantity",
+                    "value": "@quantity",
+                    "type": "float"
+                },
+                {
+                    "name": "provider_id",
+                    "value": "@provider_id",
+                    "type": "int"
+                }
+            ]
+        },
+        "measurement": {
+            "time_start": "@measurement_datetime || @measurement_date",
+            "code": "$omop:@measurement_source_concept_id",
+            "numeric_value": "@value_as_number",
+            "text_value": "@value_source_value",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "measurement",
+                    "type": "string"
+                },
+                {
+                    "name": "visit_id",
+                    "value": "@visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "unit_source_value",
+                    "value": "@unit_source_value",
+                    "type": "string"
+                },
+                {
+                    "name": "provider_id",
+                    "value": "@provider_id",
+                    "type": "int"
+                }
+            ]
+        },
+        "observation": {
+            "time_start": "@observation_datetime || @observation_date",
+            "code": "$omop:@observation_source_concept_id",
+            "numeric_value": "@value_as_number",
+            "text_value": "@value_as_string",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "observation",
+                    "type": "string"
+                },
+                {
+                    "name": "visit_id",
+                    "value": "@visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "provider_id",
+                    "value": "@provider_id",
+                    "type": "int"
+                }
+            ]
+        },
+        "note": {
+            "time_start": "@note_datetime || @note_date",
+            "code": "NOTE/{@note_title | regex_replace('\\s+', '-')}",
+            "text_value": "@note_text",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "note",
+                    "type": "string"
+                },
+                {
+                    "name": "note_id",
+                    "value": "@note_id",
+                    "type": "int"
+                },
+                {
+                    "name": "note_title",
+                    "value": "@note_title",
+                    "type": "string"
+                },
+                {
+                    "name": "visit_id",
+                    "value": "@visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "provider_id",
+                    "value": "@provider_id",
+                    "type": "int"
+                }
+            ]
+        },
+        "image_occurrence": {
+            "time_start": "@image_occurrence_date || @image_occurrence_datetime",
+            "code": "IMAGE/{@modality_source_value}|{@anatomic_site_source_value}",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "image_occurrence",
+                    "type": "string"
+                },
+                {
+                    "name": "image_occurrence_id",
+                    "value": "@image_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "image_series_uid",
+                    "value": "@image_series_uid",
+                    "type": "string"
+                },
+                {
+                    "name": "image_study_uid",
+                    "value": "@image_study_uid",
+                    "type": "string"
+                },
+                {
+                    "name": "anatomic_site_source_value",
+                    "value": "@anatomic_site_source_value",
+                    "type": "string"
+                },
+                {
+                    "name": "procedure_occurrence_id",
+                    "value": "@procedure_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "visit_occurrence_id",
+                    "value": "@visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "_study_description",
+                    "value": "@_study_description",
+                    "type": "string"
+                },
+                {
+                    "name": "_series_description",
+                    "value": "@_series_description",
+                    "type": "string"
+                },
+                {
+                    "name": "_note_id",
+                    "value": "@_note_id",
+                    "type": "int"
+                },
+                {
+                    "name": "modality_source_value",
+                    "value": "@modality_source_value",
+                    "type": "string"
+                }
+            ]
+        }
+    }
+}

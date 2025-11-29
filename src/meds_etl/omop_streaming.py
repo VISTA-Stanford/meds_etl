@@ -163,15 +163,12 @@ def get_meds_schema_from_config(config: Dict) -> Dict[str, type]:
 # ============================================================================
 
 
-def validate_config_against_data(omop_dir: Path, config: Dict, code_mapping_choice: str, verbose: bool = False) -> None:
+def validate_config_against_data(omop_dir: Path, config: Dict, verbose: bool = False) -> None:
     """
     Validate ETL configuration against actual OMOP data schema.
 
     Ensures all configured fields exist in the data with correct types.
     Also checks that the chosen code mapping method is defined for all tables.
-
-    Args:
-        code_mapping_choice: One of "concept_id", "source_value", "template"
 
     Exits with error if validation fails.
     """
@@ -290,11 +287,6 @@ def validate_config_against_data(omop_dir: Path, config: Dict, code_mapping_choi
             # After compilation, different tables may have different mapping types
             if not is_canonical and not code_mappings:
                 errors.append(f"Table '{table_name}': No code mappings defined in config.")
-            # Only warn if the CLI choice isn't available AND auto mode isn't being used
-            elif not is_canonical and code_mapping_choice not in code_mappings and code_mapping_choice != "auto":
-                # This is just a warning - the transform will fall back to available mappings
-                # Don't treat as error
-                pass
 
             # Validate fields for source_value mapping
             if "source_value" in code_mappings:
@@ -359,6 +351,51 @@ def validate_config_against_data(omop_dir: Path, config: Dict, code_mapping_choi
 
     if verbose:
         print(f"\n✅ VALIDATION PASSED ({len(tables_to_check)} tables validated)")
+
+
+# ============================================================================
+# CODE MAPPING HELPERS
+# ============================================================================
+
+
+def table_requires_concept_lookup(table_config: Dict[str, Any]) -> bool:
+    """Determine if a table configuration needs concept table lookups."""
+    code_mappings = table_config.get("code_mappings", {})
+    concept_config = code_mappings.get("concept_id")
+    if not concept_config:
+        return False
+
+    if "template" in concept_config:
+        return bool(concept_config.get("concept_fields"))
+
+    return any(key in concept_config for key in ("concept_id_field", "source_concept_id_field", "fallback_concept_id"))
+
+
+def config_requires_concept_lookup(config: Dict[str, Any]) -> bool:
+    """Check whether any table or canonical event requires concept lookups."""
+    for section in ("canonical_events", "tables"):
+        for table_config in config.get(section, {}).values():
+            if table_requires_concept_lookup(table_config):
+                return True
+    return False
+
+
+def describe_code_mapping(table_config: Dict[str, Any], is_canonical: bool, fixed_code: Optional[str]) -> str:
+    """Provide a short description of the code mapping strategy for reporting."""
+    if is_canonical or fixed_code:
+        return "fixed_code"
+
+    code_mappings = table_config.get("code_mappings", {})
+    if not code_mappings:
+        return "unknown"
+
+    parts = []
+    if "concept_id" in code_mappings:
+        parts.append("concept_id")
+    if "source_value" in code_mappings:
+        parts.append("source_value")
+
+    return "+".join(parts) if parts else "unknown"
 
 
 # ============================================================================
@@ -780,11 +817,28 @@ def apply_transforms(expr: pl.Expr, transforms: list) -> pl.Expr:
     return expr
 
 
+def build_template_expression(template: str, transforms: Optional[List[Dict[str, Any]]] = None) -> pl.Expr:
+    """Build a Polars expression from a template string with optional transforms."""
+    import re
+
+    parts = re.split(r"(\{[^}]+\})", template)
+
+    exprs = []
+    for part in parts:
+        if part.startswith("{") and part.endswith("}"):
+            field = part[1:-1]
+            exprs.append(pl.col(field).cast(pl.Utf8).fill_null(""))
+        elif part:
+            exprs.append(pl.lit(part))
+
+    code_expr = pl.concat_str(exprs)
+    return apply_transforms(code_expr, transforms or [])
+
+
 def transform_to_meds_unsorted(
     df: pl.DataFrame,
     table_config: Dict,
     primary_key: str,
-    code_mapping_choice: str,
     meds_schema: Dict[str, type],
     concept_df: Optional[pl.DataFrame] = None,
     fixed_code: Optional[str] = None,
@@ -797,7 +851,6 @@ def transform_to_meds_unsorted(
     Produces output compatible with meds_etl_cpp or unsorted.sort().
 
     Args:
-        code_mapping_choice: One of "concept_id", "source_value", "template"
         meds_schema: Global MEDS schema (ensures consistent types across all files)
     """
     # 1. subject_id
@@ -826,193 +879,84 @@ def transform_to_meds_unsorted(
     code_mappings = table_config.get("code_mappings", {})
     base_exprs = [subject_id, time]
 
-    # Determine which code mapping to actually use
-    # Priority: fixed_code > CLI choice (if available) > first available mapping
+    code_candidates: List[str] = []
     needs_concept_join = False
-    actual_mapping_choice = None
+    concept_join_alias = None
+    code_is_fixed = False
 
     if fixed_code:
-        # Canonical event with fixed code (e.g., "MEDS_BIRTH")
-        actual_mapping_choice = "fixed"
+        code_is_fixed = True
         base_exprs.append(pl.lit(fixed_code).alias("code"))
     else:
-        # Check if CLI choice is available for this table
-        if code_mapping_choice in code_mappings:
-            actual_mapping_choice = code_mapping_choice
-        elif code_mapping_choice == "auto":
-            # Auto mode: prefer concept_id, then source_value
-            if "concept_id" in code_mappings:
-                actual_mapping_choice = "concept_id"
-            elif "source_value" in code_mappings:
-                actual_mapping_choice = "source_value"
-            else:
-                raise ValueError("No code mappings defined for table")
-        else:
-            # CLI requested a specific mapping that doesn't exist for this table
-            # Try to fall back intelligently
-            available = list(code_mappings.keys())
-            if available:
-                actual_mapping_choice = available[0]
-                # Note: Could add warning here in verbose mode
-            else:
-                raise ValueError(
-                    f"No code mappings defined for table. " f"Requested: {code_mapping_choice}, Available: {available}"
-                )
+        if not code_mappings:
+            raise ValueError("No code mappings defined for table")
 
-    # Now apply the chosen mapping
-    if actual_mapping_choice == "fixed":
-        # Already handled above
-        pass
+        # Concept ID strategy
+        if "concept_id" in code_mappings:
+            concept_config = code_mappings["concept_id"]
 
-    elif actual_mapping_choice == "source_value":
-        # Direct source value - can use either 'field' or 'template'
-        source_value_config = code_mappings["source_value"]
+            if "template" in concept_config:
+                alias = "code_concept_template"
+                concept_fields_to_map = concept_config.get("concept_fields", [])
 
-        if "template" in source_value_config:
-            # Template-based code generation
-            template = source_value_config["template"]
+                if concept_fields_to_map and concept_df is not None and len(concept_df) > 0:
+                    temp_df = df
+                    for i, concept_field in enumerate(concept_fields_to_map):
+                        code_alias = f"_concept_code_{i}_{concept_field}"
+                        temp_df = temp_df.join(
+                            concept_df.select(
+                                [pl.col("concept_id").alias(f"_join_id_{i}"), pl.col("code").alias(code_alias)]
+                            ),
+                            left_on=concept_field,
+                            right_on=f"_join_id_{i}",
+                            how="left",
+                        )
 
-            parts = re.split(r"(\{[^}]+\})", template)
+                    import re
 
-            exprs = []
-            for part in parts:
-                if part.startswith("{") and part.endswith("}"):
-                    field = part[1:-1]
-                    exprs.append(pl.col(field).cast(pl.Utf8).fill_null(""))
-                elif part:
-                    exprs.append(pl.lit(part))
+                    parts = re.split(r"(\{[^}]+\})", concept_config["template"])
+                    exprs = []
+                    for part in parts:
+                        if part.startswith("{") and part.endswith("}"):
+                            field = part[1:-1]
+                            if field in concept_fields_to_map:
+                                idx = concept_fields_to_map.index(field)
+                                code_alias = f"_concept_code_{idx}_{field}"
+                                exprs.append(pl.col(code_alias).cast(pl.Utf8).fill_null(f"UNKNOWN_{field.upper()}"))
+                            else:
+                                exprs.append(pl.col(field).cast(pl.Utf8).fill_null(""))
+                        elif part:
+                            exprs.append(pl.lit(part))
 
-            # Build initial code expression
-            code_expr = pl.concat_str(exprs)
-
-            # Apply transforms if specified
-            transforms = source_value_config.get("transforms", [])
-            code_expr = apply_transforms(code_expr, transforms)
-
-            base_exprs.append(code_expr.alias("code"))
-
-        elif "field" in source_value_config:
-            # Direct field copy
-            code_field = source_value_config["field"]
-            base_exprs.append(pl.col(code_field).cast(pl.Utf8).alias("code"))
-
-        else:
-            raise ValueError("source_value mapping must have either 'field' or 'template'")
-
-    elif actual_mapping_choice == "concept_id":
-        # Concept ID mapping - can use 'template' OR field-based concept lookup
-        concept_config = code_mappings["concept_id"]
-
-        if "template" in concept_config:
-            # Template-based code generation
-            template = concept_config["template"]
-
-            # NEW FEATURE: concept_fields enables concept table lookup before substitution
-            concept_fields_to_map = concept_config.get("concept_fields", [])
-
-            if concept_fields_to_map and concept_df is not None and len(concept_df) > 0:
-                # Strategy: Join concept table multiple times (once per concept field)
-                # Then substitute the looked-up codes into the template
-
-                # Build temp DataFrame with mapped concept codes
-                temp_df = df
-
-                for i, concept_field in enumerate(concept_fields_to_map):
-                    # Create unique alias for this concept's code
-                    code_alias = f"_concept_code_{i}_{concept_field}"
-
-                    # Join to get the code for this concept_id
-                    temp_df = temp_df.join(
-                        concept_df.select(
-                            [pl.col("concept_id").alias(f"_join_id_{i}"), pl.col("code").alias(code_alias)]
-                        ),
-                        left_on=concept_field,
-                        right_on=f"_join_id_{i}",
-                        how="left",
-                    )
-
-                # Now build template expression using the mapped codes
-                parts = re.split(r"(\{[^}]+\})", template)
-                exprs = []
-
-                for part in parts:
-                    if part.startswith("{") and part.endswith("}"):
-                        field = part[1:-1]
-
-                        # Check if this field should use mapped concept code
-                        if field in concept_fields_to_map:
-                            idx = concept_fields_to_map.index(field)
-                            code_alias = f"_concept_code_{idx}_{field}"
-                            exprs.append(pl.col(code_alias).cast(pl.Utf8).fill_null(f"UNKNOWN_{field.upper()}"))
-                        else:
-                            # Regular field substitution
-                            exprs.append(pl.col(field).cast(pl.Utf8).fill_null(""))
-                    elif part:
-                        exprs.append(pl.lit(part))
-
-                # Build code expression
-                code_expr = pl.concat_str(exprs)
-
-                # Apply transforms if specified
-                transforms = concept_config.get("transforms", [])
-                code_expr = apply_transforms(code_expr, transforms)
-
-                # Update df to use the temp_df with joined concept codes
-                df = temp_df
-                base_exprs.append(code_expr.alias("code"))
-
-            else:
-                # Original behavior: template without concept lookup
-                # Just substitute raw field values (e.g., concept_ids)
-                parts = re.split(r"(\{[^}]+\})", template)
-
-                exprs = []
-                for part in parts:
-                    if part.startswith("{") and part.endswith("}"):
-                        field = part[1:-1]
-                        exprs.append(pl.col(field).cast(pl.Utf8).fill_null(""))
-                    elif part:
-                        exprs.append(pl.lit(part))
-
-                # Build initial code expression
-                code_expr = pl.concat_str(exprs)
-
-                # Apply transforms if specified
-                transforms = concept_config.get("transforms", [])
-                code_expr = apply_transforms(code_expr, transforms)
-
-                base_exprs.append(code_expr.alias("code"))
-
-        else:
-            # Standard concept_id mapping with concept table lookup
-            concept_id_field = concept_config.get("concept_id_field")
-            source_concept_id_field = concept_config.get("source_concept_id_field")
-            fallback_concept_id = concept_config.get("fallback_concept_id")
-
-            # Check if concept_id fields are actually defined
-            if not concept_id_field and not source_concept_id_field:
-                # No fields defined - use fallback_concept_id if provided
-                if fallback_concept_id is not None:
-                    # Use fallback as literal concept_id, will be joined to get code
-                    if concept_df is None or len(concept_df) == 0:
-                        raise ValueError("fallback_concept_id specified but concept_df not provided")
-
-                    needs_concept_join = True
-                    base_exprs.append(pl.lit(fallback_concept_id).cast(pl.Int64).alias("concept_id"))
+                    code_expr = pl.concat_str(exprs)
+                    transforms = concept_config.get("transforms", [])
+                    code_expr = apply_transforms(code_expr, transforms)
+                    df = temp_df
+                    base_exprs.append(code_expr.alias(alias))
                 else:
+                    code_expr = build_template_expression(concept_config["template"], concept_config.get("transforms"))
+                    base_exprs.append(code_expr.alias(alias))
+
+                code_candidates.append(alias)
+            else:
+                concept_id_field = concept_config.get("concept_id_field")
+                source_concept_id_field = concept_config.get("source_concept_id_field")
+                fallback_concept_id = concept_config.get("fallback_concept_id")
+
+                if concept_df is None or len(concept_df) == 0:
+                    raise ValueError("concept_id mapping requested but concept_df not provided")
+
+                if not concept_id_field and not source_concept_id_field and fallback_concept_id is None:
                     raise ValueError(
                         "concept_id mapping requested but no concept_id_field, "
                         "source_concept_id_field, fallback_concept_id, or template defined"
                     )
-            else:
-                # Standard concept_id mapping with fields
-                if concept_df is None or len(concept_df) == 0:
-                    raise ValueError("concept_id mapping requested but concept_df not provided")
 
                 needs_concept_join = True
+                concept_join_alias = "code_concept_lookup"
+                code_candidates.append(concept_join_alias)
 
-                # Build expression with fallback chain: source_concept_id → concept_id → fallback
-                exprs_to_coalesce = []
+                exprs_to_coalesce: List[pl.Expr] = []
                 if source_concept_id_field:
                     exprs_to_coalesce.append(pl.col(source_concept_id_field).cast(pl.Int64))
                 if concept_id_field:
@@ -1020,13 +964,34 @@ def transform_to_meds_unsorted(
                 if fallback_concept_id is not None:
                     exprs_to_coalesce.append(pl.lit(fallback_concept_id).cast(pl.Int64))
 
+                if not exprs_to_coalesce:
+                    raise ValueError("concept_id mapping requires at least one source for concept ids")
+
                 if len(exprs_to_coalesce) > 1:
                     base_exprs.append(pl.coalesce(exprs_to_coalesce).alias("concept_id"))
                 else:
                     base_exprs.append(exprs_to_coalesce[0].alias("concept_id"))
 
-    else:
-        raise ValueError(f"Unknown actual_mapping_choice: {actual_mapping_choice}")
+        # Source value strategy
+        if "source_value" in code_mappings:
+            source_value_config = code_mappings["source_value"]
+            alias = "code_source_value"
+
+            if "template" in source_value_config:
+                code_expr = build_template_expression(
+                    source_value_config["template"], source_value_config.get("transforms")
+                )
+                base_exprs.append(code_expr.alias(alias))
+            elif "field" in source_value_config:
+                code_field = source_value_config["field"]
+                base_exprs.append(pl.col(code_field).cast(pl.Utf8).alias(alias))
+            else:
+                raise ValueError("source_value mapping must have either 'field' or 'template'")
+
+            code_candidates.append(alias)
+
+        if not code_is_fixed and not code_candidates:
+            raise ValueError("No code mappings defined for table")
 
     # 4. numeric_value and text_value
     numeric_value_field = table_config.get("numeric_value_field")
@@ -1085,7 +1050,20 @@ def transform_to_meds_unsorted(
 
     # Perform concept join if needed (FAST!)
     if needs_concept_join:
-        result = result.join(concept_df, on="concept_id", how="left").drop("concept_id")
+        join_alias = concept_join_alias or "code"
+        join_df = concept_df.rename({"code": join_alias})
+        result = result.join(join_df, on="concept_id", how="left").drop("concept_id")
+
+    # Combine candidate code columns, respecting fallback order
+    if not code_is_fixed:
+        available_candidates = [alias for alias in code_candidates if alias in result.columns]
+        if not available_candidates:
+            raise ValueError("No code mapping expressions materialized for table")
+
+        result = result.with_columns(pl.coalesce([pl.col(alias) for alias in available_candidates]).alias("code"))
+        drop_cols = [alias for alias in available_candidates if alias != "code"]
+        if drop_cols:
+            result = result.drop(drop_cols)
 
     # Filter out rows with null codes
     result = result.filter(pl.col("code").is_not_null())
@@ -1120,7 +1098,6 @@ def process_omop_file_worker(args: Tuple) -> Dict:
         table_name,
         table_config,
         primary_key,
-        code_mapping_choice,
         output_dir,
         meds_schema,
         concept_df_data,
@@ -1153,7 +1130,6 @@ def process_omop_file_worker(args: Tuple) -> Dict:
             df=df,
             table_config=table_config,
             primary_key=primary_key,
-            code_mapping_choice=code_mapping_choice,
             meds_schema=meds_schema,
             concept_df=concept_df,
             fixed_code=fixed_code,
@@ -1166,30 +1142,6 @@ def process_omop_file_worker(args: Tuple) -> Dict:
         output_file = output_dir / f"{table_name}_{uuid.uuid4()}.parquet"
         meds_df.write_parquet(output_file, compression="lz4")
 
-        # Determine which mapping was used for reporting
-        code_mappings = table_config.get("code_mappings", {})
-        if is_canonical:
-            used_mapping = "fixed_code"
-        elif code_mapping_choice in code_mappings:
-            mapping_config = code_mappings[code_mapping_choice]
-            # Check if template is used within this mapping
-            if isinstance(mapping_config, dict) and "template" in mapping_config:
-                used_mapping = f"{code_mapping_choice}+template"
-            else:
-                used_mapping = code_mapping_choice
-        else:
-            # Fallback logic
-            for strategy in ["concept_id", "source_value"]:
-                if strategy in code_mappings:
-                    mapping_config = code_mappings[strategy]
-                    if isinstance(mapping_config, dict) and "template" in mapping_config:
-                        used_mapping = f"{strategy}+template"
-                    else:
-                        used_mapping = strategy
-                    break
-            else:
-                used_mapping = "unknown"
-
         return {
             "file": file_path.name,
             "table": table_name,
@@ -1197,8 +1149,8 @@ def process_omop_file_worker(args: Tuple) -> Dict:
             "output_rows": output_rows,
             "filtered_rows": filtered_rows,
             "concept_df_size": concept_df_size,
-            "code_mapping_used": used_mapping,
-            "has_concept_mapping": "concept_id" in code_mappings,
+            "code_mapping_used": describe_code_mapping(table_config, is_canonical, fixed_code),
+            "has_concept_mapping": "concept_id" in table_config.get("code_mappings", {}),
             "success": True,
         }
 
@@ -1595,7 +1547,6 @@ def run_omop_to_meds_streaming(
     config_path: Path,
     num_workers: int = 8,
     num_shards: Optional[int] = None,
-    code_mapping_mode: str = "auto",
     verbose: bool = False,
     optimize_concepts: bool = True,
     chunk_rows: int = 10_000_000,
@@ -1779,20 +1730,16 @@ def run_omop_to_meds_streaming(
     metadata_dir = temp_dir / "metadata"
     metadata_dir.mkdir()
 
-    # Determine code mapping
-    if code_mapping_mode == "auto":
-        code_mapping_choice = "concept_id"
-    else:
-        code_mapping_choice = code_mapping_mode
-
     # Validate config
-    validate_config_against_data(omop_dir, config, code_mapping_choice, verbose=verbose)
+    validate_config_against_data(omop_dir, config, verbose=verbose)
+
+    concept_lookup_needed = config_requires_concept_lookup(config)
 
     # Build concept map if needed
-    concept_df = pl.DataFrame(schema={"concept_id": pl.Int64, "code": pl.Utf8})
-    code_metadata = {}
+    concept_df: Optional[pl.DataFrame] = None
+    code_metadata: Dict[int, Any] = {}
 
-    if code_mapping_choice == "concept_id":
+    if concept_lookup_needed:
         print(f"\n{'=' * 70}")
         print("BUILDING CONCEPT MAP")
         print(f"{'=' * 70}")
@@ -1800,12 +1747,11 @@ def run_omop_to_meds_streaming(
         concept_df, code_metadata = build_concept_map(omop_dir, verbose=verbose)
 
         if len(concept_df) == 0:
-            print("\nERROR: concept_id mapping requested but concept table not found!")
+            print("\nERROR: concept_id mappings requested but concept table not found!")
             sys.exit(1)
 
         print(f"  Loaded {len(concept_df):,} concepts")
 
-        # Optimize if requested
         if optimize_concepts:
             original_size = len(concept_df)
 
@@ -1820,8 +1766,10 @@ def run_omop_to_meds_streaming(
                 concept_df = concept_df.filter(pl.col("concept_id").is_in(list(used_concept_ids)))
                 if verbose:
                     print(f"  Optimized: {original_size:,} -> {len(concept_df):,} concepts")
+    else:
+        print("\n📋 Config does not require concept lookups - skipping concept map build")
 
-    concept_df_data = pickle.dumps(concept_df)
+    concept_df_data = pickle.dumps(concept_df) if concept_df is not None else None
 
     # Save metadata
     dataset_metadata = {
@@ -1875,7 +1823,6 @@ def run_omop_to_meds_streaming(
                         table_name,
                         event_config,
                         primary_key,
-                        code_mapping_choice,
                         unsorted_dir,
                         meds_schema,
                         concept_df_data,
@@ -1895,7 +1842,6 @@ def run_omop_to_meds_streaming(
                         table_name,
                         table_config,
                         primary_key,
-                        code_mapping_choice,
                         unsorted_dir,
                         meds_schema,
                         concept_df_data,
@@ -2073,7 +2019,6 @@ def main():
     parser.add_argument("--workers", type=int, default=8, help="Stage 1 workers")
     parser.add_argument("--shards", type=int, default=None, help="Number of shards")
     parser.add_argument("--chunk_rows", type=int, default=10_000_000, help="Rows per sorted run")
-    parser.add_argument("--code_mapping", choices=["auto", "concept_id", "source_value"], default="auto")
     parser.add_argument(
         "--run_compression",
         choices=["lz4", "zstd", "snappy", "uncompressed"],
@@ -2149,7 +2094,6 @@ def main():
         config_path=Path(args.config),
         num_workers=args.workers,
         num_shards=args.shards,
-        code_mapping_mode=args.code_mapping,
         verbose=args.verbose,
         optimize_concepts=args.optimize_concepts,
         chunk_rows=args.chunk_rows,

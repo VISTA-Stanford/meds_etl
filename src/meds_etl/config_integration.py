@@ -97,7 +97,6 @@ def parse_code_field(
     config: Dict[str, Any],
     df_schema: Optional[Dict[str, pl.DataType]] = None,
     concept_df: Optional[pl.DataFrame] = None,
-    code_mapping_choice: str = "auto",
 ) -> Optional[pl.Expr]:
     """
     Parse code field from config, supporting both old and new formats.
@@ -118,7 +117,6 @@ def parse_code_field(
         config: Table or event configuration
         df_schema: DataFrame schema for validation
         concept_df: Concept DataFrame for vocabulary lookups
-        code_mapping_choice: Which mapping to use ("auto", "source_value", "concept_id", "template")
 
     Returns:
         Polars expression for code field, or None if no code mapping
