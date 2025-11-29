@@ -538,8 +538,8 @@ def build_concept_map(omop_dir: Path, verbose: bool = False) -> Tuple[pl.DataFra
         print(f"\n  Total concepts: {len(concept_df_combined):,}")
         print(f"  Custom concepts: {len(code_metadata):,}")
 
-    # Keep only concept_id and code columns for joining
-    return concept_df_combined.select(["concept_id", "code"]), code_metadata
+    # Return the full concept DataFrame with all fields for flexible field selection
+    return concept_df_combined, code_metadata
 
 
 def find_concept_id_columns_for_prescan(table_name: str, config: Dict) -> List[str]:
