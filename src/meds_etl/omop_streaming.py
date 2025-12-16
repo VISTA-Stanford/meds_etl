@@ -2,7 +2,7 @@
 OMOP to MEDS ETL with Polars Streaming External Sort
 
 This version uses Polars 1.x streaming engine for Stage 2 (external sort):
-- Stage 1: OMOP → MEDS Unsorted (same as omop_refactor.py)
+- Stage 1: OMOP → MEDS Unsorted (same as omop.py)
 - Stage 2: Streaming external sort using Polars lazy evaluation + sink_parquet
 
 Key advantage: Polars' native k-way merge is faster than manual implementations,
@@ -15,7 +15,7 @@ import gc
 import os
 import shutil
 
-# Import Stage 1 from omop_refactor.py
+# Import Stage 1 from omop.py
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -33,7 +33,7 @@ import uuid
 from tqdm import tqdm
 
 # ============================================================================
-# SCHEMA UTILITIES (from omop_refactor.py)
+# SCHEMA UTILITIES (from omop.py)
 # ============================================================================
 
 
@@ -159,7 +159,7 @@ def get_meds_schema_from_config(config: Dict) -> Dict[str, type]:
 
 
 # ============================================================================
-# CONFIGURATION VALIDATION (from omop_refactor.py)
+# CONFIGURATION VALIDATION (from omop.py)
 # ============================================================================
 
 
@@ -421,7 +421,7 @@ def describe_code_mapping(table_config: Dict[str, Any], is_canonical: bool, fixe
 
 
 # ============================================================================
-# CONCEPT MAP BUILDING (from omop_refactor.py)
+# CONCEPT MAP BUILDING (from omop.py)
 # ============================================================================
 
 
@@ -789,7 +789,7 @@ def prescan_concept_ids(
 
 
 # ============================================================================
-# FILE DISCOVERY (from omop_refactor.py)
+# FILE DISCOVERY (from omop.py)
 # ============================================================================
 
 
@@ -806,7 +806,7 @@ def find_omop_table_files(omop_dir: Path, table_name: str) -> List[Path]:
 
 
 # ============================================================================
-# TRANSFORMATION UTILITIES (from omop_refactor.py)
+# TRANSFORMATION UTILITIES (from omop.py)
 # ============================================================================
 
 
@@ -1653,7 +1653,7 @@ def streaming_external_sort(
     print(f"Total rows:    {total_rows:,}")
     print(f"Shards:        {num_shards}")
     print(f"Chunk size:    {chunk_rows:,} rows")
-    print(f"Time:          {stage2_elapsed:.2f}s")
+    print(f"Time:          {stage2_elapsed:.2f}s ({stage2_elapsed/60:.2f}m)")
     if stage2_elapsed > 0:
         print(f"Throughput:    {total_rows / stage2_elapsed / 1_000_000:.2f}M rows/sec")
 
@@ -1699,7 +1699,7 @@ def run_omop_to_meds_streaming(
     """
     Run OMOP to MEDS ETL with streaming external sort.
 
-    Same as omop_refactor.py but uses Polars streaming for Stage 2.
+    Same as omop.py but uses Polars streaming for Stage 2.
 
     Args:
         chunk_rows: Rows per sorted run (default 10M - adjust based on RAM)
@@ -1909,7 +1909,7 @@ def run_omop_to_meds_streaming(
     dataset_metadata = {
         "dataset_name": "OMOP",
         "dataset_version": time.strftime("%Y-%m-%d"),
-        "etl_name": "meds_etl.omop_refactor_streaming",
+        "etl_name": "meds_etl.omop_streaming",
         "etl_version": meds_etl.__version__,
         "meds_version": meds.__version__,
     }
@@ -1928,7 +1928,7 @@ def run_omop_to_meds_streaming(
     shutil.copytree(metadata_dir, final_metadata_dir)
 
     # ========================================================================
-    # STAGE 1: OMOP → MEDS Unsorted (reuse from omop_refactor.py)
+    # STAGE 1: OMOP → MEDS Unsorted (reuse from omop.py)
     # ========================================================================
 
     stage1_elapsed = 0
@@ -2003,7 +2003,7 @@ def run_omop_to_meds_streaming(
 
         stage1_elapsed = time.time() - stage1_start
 
-        # Report Stage 1 results (detailed, like omop_refactor.py)
+        # Report Stage 1 results (detailed, like omop.py)
         successes = [r for r in results if r["success"]]
         failures = [r for r in results if not r["success"]]
         total_input_rows = sum(r.get("input_rows", 0) for r in successes)
@@ -2022,7 +2022,7 @@ def run_omop_to_meds_streaming(
             retention_pct = 100 * total_output_rows / total_input_rows
             print(f"Retention:        {retention_pct:.1f}%")
 
-        print(f"Time:             {stage1_elapsed:.2f}s")
+        print(f"Time:             {stage1_elapsed:.2f}s ({stage1_elapsed/60:.2f}m)")
 
         # Detailed breakdown by table
         print("\nPer-table breakdown:")
@@ -2126,9 +2126,9 @@ def run_omop_to_meds_streaming(
     print("\n" + "=" * 70)
     print("ETL COMPLETE")
     print("=" * 70)
-    print(f"Stage 1 time: {stage1_elapsed:.2f}s")
-    print(f"Stage 2 time: {stage2_elapsed:.2f}s")
-    print(f"Total time:   {total_elapsed:.2f}s")
+    print(f"Stage 1 time: {stage1_elapsed:.2f}s ({stage1_elapsed/60:.2f}m)")
+    print(f"Stage 2 time: {stage2_elapsed:.2f}s ({stage2_elapsed/60:.2f}m)")
+    print(f"Total time:   {total_elapsed:.2f}s ({total_elapsed/60:.2f}m)")
     print(f"Total rows:   {total_output_rows:,}")
     if total_output_rows > 0:
         print(f"Throughput:   {total_output_rows/total_elapsed:,.0f} rows/s")

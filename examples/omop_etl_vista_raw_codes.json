@@ -70,7 +70,7 @@
         "visit_occurrence": {
             "time_start": "@visit_start_datetime || @visit_start_date",
             "time_end": "@visit_end_datetime || @visit_end_date",
-            "code": "@visit_concept_id",
+            "code": "$omop:@visit_concept_id",
             "properties": [
                 {
                     "name": "table",
@@ -129,7 +129,7 @@
         "condition_occurrence": {
             "time_start": "@condition_start_datetime || @condition_start_date",
             "time_end": "@condition_end_datetime || @condition_end_date",
-            "code": "@condition_concept_id",
+            "code": "$omop:@condition_source_concept_id",
             "properties": [
                 {
                     "name": "table",
@@ -151,7 +151,7 @@
         "drug_exposure": {
             "time_start": "@drug_exposure_start_datetime || @drug_exposure_start_date",
             "time_end": "@drug_exposure_end_datetime || @drug_exposure_end_date",
-            "code": "@drug_concept_id",
+            "code": "$omop:@drug_source_concept_id",
             "properties": [
                 {
                     "name": "table",
@@ -172,7 +172,7 @@
         },
         "procedure_occurrence": {
             "time_start": "@procedure_datetime || @procedure_date",
-            "code": "@procedure_concept_id",
+            "code": "$omop:@procedure_source_concept_id",
             "properties": [
                 {
                     "name": "table",
@@ -204,7 +204,7 @@
         "device_exposure": {
             "time_start": "@device_exposure_start_datetime || @device_exposure_start_date",
             "time_end": "@device_exposure_end_datetime || @device_exposure_end_date",
-            "code": "@device_concept_id",
+            "code": "$omop:@device_source_concept_id",
             "properties": [
                 {
                     "name": "table",
@@ -230,7 +230,7 @@
         },
         "measurement": {
             "time_start": "@measurement_datetime || @measurement_date",
-            "code": "@measurement_concept_id",
+            "code": "$omop:@measurement_source_concept_id",
             "numeric_value": "@value_as_number",
             "text_value": "@value_source_value",
             "properties": [
@@ -258,7 +258,7 @@
         },
         "observation": {
             "time_start": "@observation_datetime || @observation_date",
-            "code": "@observation_concept_id",
+            "code": "$omop:@observation_source_concept_id",
             "numeric_value": "@value_as_number",
             "text_value": "@value_as_string",
             "properties": [

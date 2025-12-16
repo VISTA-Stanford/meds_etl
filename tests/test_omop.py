@@ -4,7 +4,7 @@ from pathlib import Path
 
 import polars as pl
 
-from meds_etl.omop import DEFAULT_VISIT_CONCEPT_ID, write_event_data
+from meds_etl.omop_legacy import DEFAULT_VISIT_CONCEPT_ID, write_event_data
 
 
 def test_discharged_to_concept_id_correct():

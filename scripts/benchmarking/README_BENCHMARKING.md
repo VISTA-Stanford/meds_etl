@@ -6,10 +6,9 @@ This directory contains scripts for benchmarking and tuning MEDS ETL methods.
 
 ### 1. `benchmark_methods_bakeoff.py`
 
-Compares all three OMOP → MEDS ETL methods sequentially:
-- `omop.py` (legacy)
-- `omop_streaming.py` (streaming with external sort)
-- `omop_refactor.py` (refactored with config)
+Compares OMOP → MEDS ETL methods sequentially:
+- `omop_legacy.py` (legacy API with positional args)
+- `omop.py` (recommended, config-driven)
 
 **Usage:**
 
@@ -42,9 +41,8 @@ python examples/benchmark_methods_bakeoff.py \
 - Timestamped log file: `benchmark_bakeoff_YYYYMMDD_HHMMSS.log`
 - JSON results file: `benchmark_bakeoff_YYYYMMDD_HHMMSS.json`
 - Separate output directories for each method:
-  - `omop_output/`
-  - `streaming_output/`
-  - `refactor_output/`
+  - `omop_legacy_output_{backend}/`
+  - `omop_output_{backend}/`
 
 **Log Contents:**
 

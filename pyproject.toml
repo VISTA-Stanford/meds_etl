@@ -46,6 +46,7 @@ tests = [
 [project.scripts]
 meds_etl_mimic = "meds_etl.mimic:main"
 meds_etl_omop = "meds_etl.omop:main"
+meds_etl_omop_legacy = "meds_etl.omop_legacy:main"
 meds_etl_omop_streaming = "meds_etl.omop_streaming:main"
 meds_etl_sort = "meds_etl.unsorted:sort_main"
 

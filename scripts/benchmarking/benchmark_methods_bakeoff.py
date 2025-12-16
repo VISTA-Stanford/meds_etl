@@ -2,10 +2,10 @@
 """
 Benchmark Bake-off: Compare OMOP → MEDS ETL methods
 
-This script compares omop.py (legacy) and omop_refactor.py (recommended)
+This script compares omop_legacy.py and omop.py (recommended)
 with both C++ and Polars backends:
+- omop_legacy.py [cpp, polars]
 - omop.py [cpp, polars]
-- omop_refactor.py [cpp, polars]
 
 Usage:
     python benchmark_methods_bakeoff.py \
@@ -213,17 +213,17 @@ def main():
     results = {}
 
     # ========================================================================
-    # 1. omop.py (legacy) - Test both backends
+    # 1. omop_legacy.py - Test both backends
     # ========================================================================
     if "omop" in methods_to_run:
         for backend in backends_to_run:
-            method_name = f"omop.py (legacy - {backend})"
-            output_dir = base_output / f"omop_output_{backend}"
+            method_name = f"omop_legacy.py ({backend})"
+            output_dir = base_output / f"omop_legacy_output_{backend}"
 
             cmd = [
                 sys.executable,
                 "-m",
-                "meds_etl.omop",
+                "meds_etl.omop_legacy",
                 args.omop_dir,
                 str(output_dir),
                 "--num_shards",
@@ -244,33 +244,33 @@ def main():
             success, elapsed = run_command(cmd, logger, method_name)
             stats = get_output_stats(output_dir, logger) if success else None
 
-            results[f"omop_{backend}"] = {
+            results[f"legacy_{backend}"] = {
                 "success": success,
                 "elapsed_seconds": elapsed,
                 "elapsed_minutes": elapsed / 60,
                 "output_dir": str(output_dir),
                 "backend": backend,
-                "method": "omop.py",
+                "method": "omop_legacy.py",
                 "stats": stats,
             }
 
             logger.log("")
 
     # ========================================================================
-    # 2. omop_refactor.py (recommended) - Test both backends
+    # 2. omop.py (recommended) - Test both backends
     # ========================================================================
     if "refactor" in methods_to_run:
         for backend in backends_to_run:
-            method_name = f"omop_refactor.py (recommended - {backend})"
-            output_dir = base_output / f"refactor_output_{backend}"
+            method_name = f"omop.py (recommended - {backend})"
+            output_dir = base_output / f"omop_output_{backend}"
 
-            # Map backend for refactor (it uses 'auto', 'cpp', or 'polars')
+            # Map backend for omop.py (it uses 'auto', 'cpp', or 'polars')
             backend_arg = backend if backend in ["cpp", "polars"] else "auto"
 
             cmd = [
                 sys.executable,
                 "-m",
-                "meds_etl.omop_refactor",
+                "meds_etl.omop",
                 "--omop_dir",
                 args.omop_dir,
                 "--output_dir",
@@ -294,13 +294,13 @@ def main():
             success, elapsed = run_command(cmd, logger, method_name)
             stats = get_output_stats(output_dir, logger) if success else None
 
-            results[f"refactor_{backend}"] = {
+            results[f"omop_{backend}"] = {
                 "success": success,
                 "elapsed_seconds": elapsed,
                 "elapsed_minutes": elapsed / 60,
                 "output_dir": str(output_dir),
                 "backend": backend,
-                "method": "omop_refactor.py",
+                "method": "omop.py",
                 "stats": stats,
             }
 
@@ -350,15 +350,15 @@ def main():
                 speedup = results[polars_key]["elapsed_seconds"] / results[cpp_key]["elapsed_seconds"]
                 logger.log(f"Speedup ({method}.py: polars → cpp): {speedup:.2f}x")
 
-    # Compare omop.py vs omop_refactor.py for each backend
+    # Compare omop_legacy.py vs omop.py for each backend
     for backend in backends_to_run:
+        legacy_key = f"legacy_{backend}"
         omop_key = f"omop_{backend}"
-        refactor_key = f"refactor_{backend}"
 
-        if omop_key in results and refactor_key in results:
-            if results[omop_key]["success"] and results[refactor_key]["success"]:
-                speedup = results[omop_key]["elapsed_seconds"] / results[refactor_key]["elapsed_seconds"]
-                logger.log(f"Speedup ({backend} backend: omop.py → omop_refactor.py): {speedup:.2f}x")
+        if legacy_key in results and omop_key in results:
+            if results[legacy_key]["success"] and results[omop_key]["success"]:
+                speedup = results[legacy_key]["elapsed_seconds"] / results[omop_key]["elapsed_seconds"]
+                logger.log(f"Speedup ({backend} backend: omop_legacy.py → omop.py): {speedup:.2f}x")
 
     logger.log("")
     logger.log(f"End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
