@@ -62,6 +62,22 @@ uv run python -m meds_etl.omop \
 
 On a 128-core Linux server, the C++ backend processes **3 billion events in ~5 minutes** (vs ~40 min with pure Python).
 
+### Pure Python Alternative
+
+For environments without C++ compilation, `omop_streaming.py` uses Polars' streaming engine for memory-efficient sorting:
+
+```bash
+uv run python -m meds_etl.omop_streaming \
+  --omop_dir /path/to/omop \
+  --output_dir /path/to/meds \
+  --config examples/omop_etl_vista_std_concepts.json \
+  --workers 10 \
+  --shards 10 \
+  --verbose
+```
+
+This uses a two-phase external sort (partition → k-way merge) that stays memory-bounded and can be faster than the C++ backend for very large datasets.
+
 ## 📚 Example Configs
 
 | Config | Code Format | Example Output |
