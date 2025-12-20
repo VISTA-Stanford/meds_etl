@@ -1508,7 +1508,6 @@ def run_omop_to_meds_etl(
     num_shards: Optional[int] = None,
     backend: str = "polars",
     verbose: bool = False,
-    optimize_concepts: bool = True,
     low_memory: bool = False,
     parallel_shards: bool = False,
     process_method: str = "spawn",
@@ -1535,7 +1534,6 @@ def run_omop_to_meds_etl(
 
     Args:
         num_shards: Number of output shards (default: from config or 100)
-        optimize_concepts: If True, pre-scan data to optimize concept map (99% memory reduction)
         backend: Backend for Stage 2 sort: 'auto' (try cpp, fallback polars), 'cpp', 'polars'
         low_memory: If True, use sequential shard processing (slowest, minimal memory)
         parallel_shards: If True, use parallel shard processing (each worker processes one shard)
@@ -1636,30 +1634,29 @@ def run_omop_to_meds_etl(
         print(f"  ✅ Loaded {len(concept_df):,} concepts")
 
         # Optimize concept map by pre-scanning (99% memory reduction!)
-        if optimize_concepts:
+        if verbose:
+            print("\n📊 Optimizing concept map (pre-scanning data to find used concepts)...")
+
+        original_size = len(concept_df)
+
+        # Pre-scan to find which concept_ids are actually used
+        used_concept_ids = prescan_concept_ids(
+            omop_dir, config, num_workers, verbose=verbose, process_method=process_method
+        )
+
+        if used_concept_ids:
+            # Filter concept DataFrame to only used concepts
+            concept_df = concept_df.filter(pl.col("concept_id").is_in(list(used_concept_ids)))
+            filtered_size = len(concept_df)
+
             if verbose:
-                print("\n📊 Optimizing concept map (pre-scanning data to find used concepts)...")
-
-            original_size = len(concept_df)
-
-            # Pre-scan to find which concept_ids are actually used
-            used_concept_ids = prescan_concept_ids(
-                omop_dir, config, num_workers, verbose=verbose, process_method=process_method
-            )
-
-            if used_concept_ids:
-                # Filter concept DataFrame to only used concepts
-                concept_df = concept_df.filter(pl.col("concept_id").is_in(list(used_concept_ids)))
-                filtered_size = len(concept_df)
-
-                if verbose:
-                    reduction_pct = 100 * (1 - filtered_size / original_size) if original_size > 0 else 0
-                    memory_before_mb = original_size * 100 / 1024 / 1024  # Rough estimate
-                    memory_after_mb = filtered_size * 100 / 1024 / 1024
-                    print(
-                        f"  ✅ Optimized: {original_size:,} → {filtered_size:,} concepts ({reduction_pct:.1f}% reduction)"
-                    )
-                    print(f"  💾 Memory: ~{memory_before_mb:.1f} MB → ~{memory_after_mb:.1f} MB")
+                reduction_pct = 100 * (1 - filtered_size / original_size) if original_size > 0 else 0
+                memory_before_mb = original_size * 100 / 1024 / 1024  # Rough estimate
+                memory_after_mb = filtered_size * 100 / 1024 / 1024
+                print(
+                    f"  ✅ Optimized: {original_size:,} → {filtered_size:,} concepts ({reduction_pct:.1f}% reduction)"
+                )
+                print(f"  💾 Memory: ~{memory_before_mb:.1f} MB → ~{memory_after_mb:.1f} MB")
     else:
         print("\n📋 Config does not require concept lookups - skipping concept map build")
 
@@ -2024,12 +2021,6 @@ def main():
         help="Enable verbose output",
     )
     parser.add_argument(
-        "--no-optimize-concepts",
-        dest="optimize_concepts",
-        action="store_false",
-        help="Disable concept map optimization (default: enabled)",
-    )
-    parser.add_argument(
         "--low-memory",
         action="store_true",
         help="Use sequential shard processing (slowest, minimal memory usage - processes one shard at a time)",
@@ -2061,7 +2052,6 @@ def main():
         num_shards=args.shards,
         backend=args.backend,
         verbose=args.verbose,
-        optimize_concepts=args.optimize_concepts,
         low_memory=args.low_memory,
         parallel_shards=args.parallel_shards,
         process_method=args.process_method,

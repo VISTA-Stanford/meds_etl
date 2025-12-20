@@ -1682,7 +1682,6 @@ def run_omop_to_meds_streaming(
     num_workers: int = 8,
     num_shards: Optional[int] = None,
     verbose: bool = False,
-    optimize_concepts: bool = True,
     chunk_rows: int = 10_000_000,
     run_compression: str = "lz4",
     final_compression: str = "zstd",
@@ -1886,20 +1885,19 @@ def run_omop_to_meds_streaming(
 
         print(f"  Loaded {len(concept_df):,} concepts")
 
-        if optimize_concepts:
-            original_size = len(concept_df)
+        # Optimize concept map by pre-scanning (99% memory reduction!)
+        original_size = len(concept_df)
 
+        if verbose:
+            print("\nOptimizing concept map (pre-scanning data to find used concepts)...")
+            print(f"  Using {num_workers} workers to scan OMOP files")
+
+        used_concept_ids = prescan_concept_ids(omop_dir, config, num_workers, verbose=verbose)
+
+        if used_concept_ids:
+            concept_df = concept_df.filter(pl.col("concept_id").is_in(list(used_concept_ids)))
             if verbose:
-                print("\nOptimizing concept map (pre-scanning data to find used concepts)...")
-                print(f"  Using {num_workers} workers to scan OMOP files")
-                print("  (If this hangs on Linux, ensure --process_method spawn is set)")
-
-            used_concept_ids = prescan_concept_ids(omop_dir, config, num_workers, verbose=verbose)
-
-            if used_concept_ids:
-                concept_df = concept_df.filter(pl.col("concept_id").is_in(list(used_concept_ids)))
-                if verbose:
-                    print(f"  Optimized: {original_size:,} -> {len(concept_df):,} concepts")
+                print(f"  Optimized: {original_size:,} -> {len(concept_df):,} concepts")
     else:
         print("\n📋 Config does not require concept lookups - skipping concept map build")
 
@@ -2213,7 +2211,6 @@ def main():
     )
 
     parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--no-optimize-concepts", dest="optimize_concepts", action="store_false")
     parser.add_argument(
         "--force-refresh",
         action="store_true",
@@ -2229,7 +2226,6 @@ def main():
         num_workers=args.workers,
         num_shards=args.shards,
         verbose=args.verbose,
-        optimize_concepts=args.optimize_concepts,
         chunk_rows=args.chunk_rows,
         run_compression=args.run_compression,
         final_compression=args.final_compression,
