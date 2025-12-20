@@ -1,0 +1,107 @@
+{
+    "omop_cdm_version": "5.3.1",
+    "primary_key": "person_id",
+    "canonical_events": {
+        "birth": {
+            "table": "person",
+            "code": "MEDS_BIRTH",
+            "time_start": "@birth_datetime",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "person",
+                    "type": "string"
+                }
+            ]
+        },
+        "gender": {
+            "table": "person",
+            "code": "Gender/{@gender_concept_id}",
+            "time_start": "@birth_datetime",
+            "text_value": "$omop:@gender_concept_id",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "person",
+                    "type": "string"
+                }
+            ]
+        },
+        "death": {
+            "table": "death",
+            "code": "MEDS_DEATH",
+            "time_start": "@death_datetime || @death_date",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "death",
+                    "type": "string"
+                }
+            ]
+        }
+    },
+    "tables": {
+        "visit_occurrence": {
+            "time_start": "@visit_start_datetime || @visit_start_date",
+            "time_end": "@visit_end_datetime || @visit_end_date",
+            "code": "$omop:@visit_concept_id",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "visit_occurrence",
+                    "type": "string"
+                },
+                {
+                    "name": "visit_id",
+                    "value": "@visit_occurrence_id",
+                    "type": "int"
+                }
+            ]
+        },
+        "drug_exposure": {
+            "time_start": "@drug_exposure_start_datetime || @drug_exposure_start_date",
+            "time_end": "@drug_exposure_end_datetime || @drug_exposure_end_date",
+            "code": "$omop:@drug_concept_id",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "drug_exposure",
+                    "type": "string"
+                },
+                {
+                    "name": "visit_id",
+                    "value": "@visit_occurrence_id",
+                    "type": "int"
+                },
+                {
+                    "name": "drug_type",
+                    "value": "$omop:@drug_type_concept_id",
+                    "type": "string"
+                }
+            ]
+        },
+        "note": {
+            "time_start": "@note_datetime || @note_date",
+            "code": "NOTE/{@note_title | regex_replace('\\s+', '-')}",
+            "text_value": "@note_text",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "note",
+                    "type": "string"
+                }
+            ]
+        },
+        "image_occurrence": {
+            "time_start": "@image_occurrence_datetime || @image_occurrence_date",
+            "code": "IMAGE/{@modality_source_value}|{@anatomic_site_source_value}",
+            "properties": [
+                {
+                    "name": "table",
+                    "value": "image_occurrence",
+                    "type": "string"
+                }
+            ]
+        }
+    }
+}

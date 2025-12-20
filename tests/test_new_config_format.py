@@ -1,5 +1,5 @@
 """
-Test the new templated config format with the example config file.
+Test the new templated config format with a test fixture config file.
 """
 
 import json
@@ -9,13 +9,15 @@ import polars as pl
 
 from meds_etl.config_parser import parse_config_value
 
+# Path to test config fixture
+TEST_CONFIG_PATH = Path(__file__).parent / "fixtures" / "test_config.json"
+
 
 def test_parse_new_config_examples():
     """Test parsing examples from the new config format."""
 
-    # Load the new config
-    config_path = Path(__file__).parent.parent / "examples" / "omop_etl_vista_config_templated.json"
-    with open(config_path) as f:
+    # Load the test config
+    with open(TEST_CONFIG_PATH) as f:
         config = json.load(f)
 
     # Test birth event
@@ -75,8 +77,7 @@ def test_parse_new_config_examples():
 
 def test_parse_all_time_fields():
     """Test that all time fields can be parsed."""
-    config_path = Path(__file__).parent.parent / "examples" / "omop_etl_vista_config_templated.json"
-    with open(config_path) as f:
+    with open(TEST_CONFIG_PATH) as f:
         config = json.load(f)
 
     # Test canonical events
@@ -98,8 +99,7 @@ def test_parse_all_time_fields():
 
 def test_parse_all_code_fields():
     """Test that all code fields can be parsed."""
-    config_path = Path(__file__).parent.parent / "examples" / "omop_etl_vista_config_templated.json"
-    with open(config_path) as f:
+    with open(TEST_CONFIG_PATH) as f:
         config = json.load(f)
 
     # Test canonical events
@@ -117,8 +117,7 @@ def test_parse_all_code_fields():
 
 def test_parse_all_properties():
     """Test that all property values can be parsed."""
-    config_path = Path(__file__).parent.parent / "examples" / "omop_etl_vista_config_templated.json"
-    with open(config_path) as f:
+    with open(TEST_CONFIG_PATH) as f:
         config = json.load(f)
 
     # Test canonical events
