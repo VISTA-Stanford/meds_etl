@@ -95,11 +95,15 @@ def read_polars_df(fname: str) -> pl.DataFrame:
     """Read a file that might be a CSV or Parquet file"""
     if fname.endswith(".csv"):
         # Don't try to infer schema because it can cause errors with columns that look like ints but aren't
-        return pl.read_csv(fname, infer_schema=False)
+        df = pl.read_csv(fname, infer_schema=False)
     elif fname.endswith(".parquet"):
-        return pl.read_parquet(fname)
+        df = pl.read_parquet(fname)
     else:
         raise RuntimeError("Found file of unknown type " + fname + " expected parquet or csv")
+    
+    # Normalize column names to lowercase (BigQuery/SQL are case-insensitive)
+    df = df.rename({col: col.lower() for col in df.columns})
+    return df
 
 
 def load_file(path_to_decompressed_dir: str, fname: str) -> Any:
