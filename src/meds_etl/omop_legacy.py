@@ -100,7 +100,7 @@ def read_polars_df(fname: str) -> pl.DataFrame:
         df = pl.read_parquet(fname)
     else:
         raise RuntimeError("Found file of unknown type " + fname + " expected parquet or csv")
-    
+
     # Normalize column names to lowercase (BigQuery/SQL are case-insensitive)
     df = df.rename({col: col.lower() for col in df.columns})
     return df

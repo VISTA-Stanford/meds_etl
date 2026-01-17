@@ -476,7 +476,7 @@ def build_concept_map(omop_dir: Path, verbose: bool = False) -> Tuple[pl.DataFra
     # Load concepts as DataFrames (keep as DF for fast joins!)
     for concept_file in tqdm(concept_files, desc="Loading concepts"):
         df = pl.read_parquet(concept_file)
-        
+
         # Normalize column names to lowercase (BigQuery/SQL are case-insensitive)
         df = df.rename({col: col.lower() for col in df.columns})
 
@@ -522,7 +522,7 @@ def build_concept_map(omop_dir: Path, verbose: bool = False) -> Tuple[pl.DataFra
 
         for rel_file in tqdm(rel_files, desc="Loading concept relationships"):
             df = pl.read_parquet(rel_file)
-            
+
             # Normalize column names to lowercase (BigQuery/SQL are case-insensitive)
             df = df.rename({col: col.lower() for col in df.columns})
 
@@ -633,10 +633,10 @@ def fast_scan_file_for_concept_ids(file_path: Path, concept_id_columns: List[str
         # Get original schema and create lowercase mapping
         schema = lazy_df.collect_schema()
         col_mapping = {col: col.lower() for col in schema.names()}
-        
+
         # Rename columns to lowercase in the lazy frame
         lazy_df = lazy_df.rename(col_mapping)
-        
+
         # Now check which concept_id columns exist (in lowercase)
         concept_id_columns_lower = [col.lower() for col in concept_id_columns]
         schema_lower = lazy_df.collect_schema()
@@ -1239,10 +1239,10 @@ def process_omop_file_worker(args: Tuple) -> Dict:
     try:
         # Read OMOP file
         df = pl.read_parquet(file_path)
-        
+
         # Normalize column names to lowercase (BigQuery/SQL are case-insensitive)
         df = df.rename({col: col.lower() for col in df.columns})
-        
+
         input_rows = len(df)
 
         if input_rows == 0:
