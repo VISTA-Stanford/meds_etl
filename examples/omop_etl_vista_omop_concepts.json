@@ -9,7 +9,7 @@
             "properties": [
                 {
                     "name": "table",
-                    "value": "person",
+                    "value": "$literal:person",
                     "type": "string"
                 }
             ]
@@ -22,7 +22,7 @@
             "properties": [
                 {
                     "name": "table",
-                    "value": "person",
+                    "value": "$literal:person",
                     "type": "string"
                 }
             ]
@@ -35,7 +35,7 @@
             "properties": [
                 {
                     "name": "table",
-                    "value": "person",
+                    "value": "$literal:person",
                     "type": "string"
                 }
             ]
@@ -48,7 +48,7 @@
             "properties": [
                 {
                     "name": "table",
-                    "value": "person",
+                    "value": "$literal:person",
                     "type": "string"
                 }
             ]
@@ -60,7 +60,7 @@
             "properties": [
                 {
                     "name": "table",
-                    "value": "death",
+                    "value": "$literal:death",
                     "type": "string"
                 }
             ]
@@ -74,7 +74,7 @@
             "properties": [
                 {
                     "name": "table",
-                    "value": "visit_occurrence",
+                    "value": "$literal:visit_occurrence",
                     "type": "string"
                 },
                 {
@@ -102,11 +102,11 @@
         "visit_detail": {
             "time_start": "@visit_detail_start_datetime || @visit_detail_start_date",
             "time_end": "@visit_detail_end_datetime || @visit_detail_end_date",
-            "code": "STANFORD_VISIT_DETAIL/{@visit_detail_source_value | split('|', 3, 'Unknown')}",
+            "code": "STANFORD_VISIT_DETAIL/{@visit_detail_source_value >> split('|', 3, 'Unknown')}",
             "properties": [
                 {
                     "name": "table",
-                    "value": "visit_detail",
+                    "value": "$literal:visit_detail",
                     "type": "string"
                 },
                 {
@@ -133,7 +133,7 @@
             "properties": [
                 {
                     "name": "table",
-                    "value": "condition_occurrence",
+                    "value": "$literal:condition_occurrence",
                     "type": "string"
                 },
                 {
@@ -155,7 +155,7 @@
             "properties": [
                 {
                     "name": "table",
-                    "value": "drug_exposure",
+                    "value": "$literal:drug_exposure",
                     "type": "string"
                 },
                 {
@@ -176,7 +176,7 @@
             "properties": [
                 {
                     "name": "table",
-                    "value": "procedure_occurrence",
+                    "value": "$literal:procedure_occurrence",
                     "type": "string"
                 },
                 {
@@ -208,7 +208,7 @@
             "properties": [
                 {
                     "name": "table",
-                    "value": "device_exposure",
+                    "value": "$literal:device_exposure",
                     "type": "string"
                 },
                 {
@@ -236,7 +236,7 @@
             "properties": [
                 {
                     "name": "table",
-                    "value": "measurement",
+                    "value": "$literal:measurement",
                     "type": "string"
                 },
                 {
@@ -264,7 +264,7 @@
             "properties": [
                 {
                     "name": "table",
-                    "value": "observation",
+                    "value": "$literal:observation",
                     "type": "string"
                 },
                 {
@@ -281,12 +281,12 @@
         },
         "note": {
             "time_start": "@note_datetime || @note_date",
-            "code": "STANFORD_NOTE/{@note_title | regex_replace('\\s+', '-')}",
+            "code": "STANFORD_NOTE/{@note_title >> regex_replace('\\s+', '-')}",
             "text_value": "@note_text",
             "properties": [
                 {
                     "name": "table",
-                    "value": "note",
+                    "value": "$literal:note",
                     "type": "string"
                 },
                 {
@@ -317,7 +317,7 @@
             "properties": [
                 {
                     "name": "table",
-                    "value": "image_occurrence",
+                    "value": "$literal:image_occurrence",
                     "type": "string"
                 },
                 {

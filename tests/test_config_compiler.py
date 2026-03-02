@@ -90,9 +90,11 @@ def test_compile_code_fallback_chain():
 
 
 def test_compile_literal_property():
-    """Test compiling property with literal value."""
+    """Test compiling property with $literal: value."""
     config = {
-        "tables": {"drug_exposure": {"properties": [{"name": "table", "value": "drug_exposure", "type": "string"}]}}
+        "tables": {
+            "drug_exposure": {"properties": [{"name": "table", "value": "$literal:drug_exposure", "type": "string"}]}
+        }
     }
 
     compiled = compile_config(config)
@@ -101,6 +103,16 @@ def test_compile_literal_property():
     assert "value" not in prop
     assert prop["literal"] == "drug_exposure"
     assert prop["name"] == "table"
+
+
+def test_compile_bare_string_property_errors():
+    """Test that bare string property values raise an error."""
+    config = {
+        "tables": {"drug_exposure": {"properties": [{"name": "table", "value": "drug_exposure", "type": "string"}]}}
+    }
+
+    with pytest.raises(ValueError, match="Ambiguous property value"):
+        compile_config(config)
 
 
 def test_compile_preserves_old_format():

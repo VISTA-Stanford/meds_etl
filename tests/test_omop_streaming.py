@@ -120,7 +120,7 @@ def test_get_meds_schema_from_config():
     assert schema["subject_id"] == pl.Int64
     assert schema["time"] == pl.Datetime("us")
     assert schema["code"] == pl.Utf8
-    assert schema["numeric_value"] == pl.Float64
+    assert schema["numeric_value"] == pl.Float32
     assert schema["text_value"] == pl.Utf8
     assert schema["end"] == pl.Datetime("us")
 
@@ -231,7 +231,7 @@ def test_transform_to_meds_fixed_code():
         "subject_id": pl.Int64,
         "time": pl.Datetime("us"),
         "code": pl.Utf8,
-        "numeric_value": pl.Float64,
+        "numeric_value": pl.Float32,
         "text_value": pl.Utf8,
         "end": pl.Datetime("us"),
         "gender_concept_id": pl.Int64,
@@ -272,7 +272,7 @@ def test_transform_to_meds_source_value_field():
         "subject_id": pl.Int64,
         "time": pl.Datetime("us"),
         "code": pl.Utf8,
-        "numeric_value": pl.Float64,
+        "numeric_value": pl.Float32,
         "text_value": pl.Utf8,
         "end": pl.Datetime("us"),
     }
@@ -315,7 +315,7 @@ def test_transform_to_meds_template():
         "subject_id": pl.Int64,
         "time": pl.Datetime("us"),
         "code": pl.Utf8,
-        "numeric_value": pl.Float64,
+        "numeric_value": pl.Float32,
         "text_value": pl.Utf8,
         "end": pl.Datetime("us"),
     }
@@ -362,7 +362,7 @@ def test_transform_to_meds_concept_join():
         "subject_id": pl.Int64,
         "time": pl.Datetime("us"),
         "code": pl.Utf8,
-        "numeric_value": pl.Float64,
+        "numeric_value": pl.Float32,
         "text_value": pl.Utf8,
         "end": pl.Datetime("us"),
     }
@@ -378,8 +378,8 @@ def test_transform_to_meds_concept_join():
     assert len(result) == 2
     assert result["code"][0] == "LOINC/8310-5"
     assert result["code"][1] == "LOINC/8867-4"
-    assert result["numeric_value"][0] == 98.6
-    assert result["numeric_value"][1] == 120.0
+    assert abs(result["numeric_value"][0] - 98.6) < 0.01
+    assert abs(result["numeric_value"][1] - 120.0) < 0.01
 
 
 def test_transform_to_meds_with_end_time():
@@ -412,7 +412,7 @@ def test_transform_to_meds_with_end_time():
         "subject_id": pl.Int64,
         "time": pl.Datetime("us"),
         "code": pl.Utf8,
-        "numeric_value": pl.Float64,
+        "numeric_value": pl.Float32,
         "text_value": pl.Utf8,
         "end": pl.Datetime("us"),
     }
@@ -462,7 +462,7 @@ def test_transform_to_meds_filters_null_codes():
         "subject_id": pl.Int64,
         "time": pl.Datetime("us"),
         "code": pl.Utf8,
-        "numeric_value": pl.Float64,
+        "numeric_value": pl.Float32,
         "text_value": pl.Utf8,
         "end": pl.Datetime("us"),
     }
@@ -716,7 +716,7 @@ def test_process_omop_file_worker_success():
             "subject_id": pl.Int64,
             "time": pl.Datetime("us"),
             "code": pl.Utf8,
-            "numeric_value": pl.Float64,
+            "numeric_value": pl.Float32,
             "text_value": pl.Utf8,
             "end": pl.Datetime("us"),
         }
@@ -778,7 +778,7 @@ def test_process_omop_file_worker_empty_file():
             "subject_id": pl.Int64,
             "time": pl.Datetime("us"),
             "code": pl.Utf8,
-            "numeric_value": pl.Float64,
+            "numeric_value": pl.Float32,
             "text_value": pl.Utf8,
             "end": pl.Datetime("us"),
         }
@@ -848,7 +848,7 @@ def test_end_to_end_simple_measurement():
         "subject_id": pl.Int64,
         "time": pl.Datetime("us"),
         "code": pl.Utf8,
-        "numeric_value": pl.Float64,
+        "numeric_value": pl.Float32,
         "text_value": pl.Utf8,
         "end": pl.Datetime("us"),
         "unit_concept_id": pl.Int64,
@@ -926,7 +926,7 @@ def test_literal_property():
         "subject_id": pl.Int64,
         "time": pl.Datetime("us"),
         "code": pl.Utf8,
-        "numeric_value": pl.Float64,
+        "numeric_value": pl.Float32,
         "text_value": pl.Utf8,
         "end": pl.Datetime("us"),
         "table_name": pl.Utf8,
@@ -1026,7 +1026,7 @@ def test_aliased_property():
         "subject_id": pl.Int64,
         "time": pl.Datetime("us"),
         "code": pl.Utf8,
-        "numeric_value": pl.Float64,
+        "numeric_value": pl.Float32,
         "text_value": pl.Utf8,
         "end": pl.Datetime("us"),
         "meas_id": pl.Int64,  # Aliased output name
@@ -1084,7 +1084,7 @@ def test_concept_mapped_template():
         "subject_id": pl.Int64,
         "time": pl.Datetime("us"),
         "code": pl.Utf8,
-        "numeric_value": pl.Float64,
+        "numeric_value": pl.Float32,
         "text_value": pl.Utf8,
         "end": pl.Datetime("us"),
     }

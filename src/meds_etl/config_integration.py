@@ -39,13 +39,16 @@ def is_template_syntax(value: str) -> bool:
     """
     Check if a string uses template syntax.
 
+    Matches ``@column``, ``$omop:``, ``$literal:``, ``{template}``, ``||`` fallbacks,
+    and ``>>`` transform pipes.
+
     Args:
         value: String to check
 
     Returns:
         True if it contains template syntax markers
     """
-    return any(marker in value for marker in ["@", "$", "{", "||"])
+    return any(marker in value for marker in ["@", "$", "{", "||", ">>"])
 
 
 def parse_time_field(

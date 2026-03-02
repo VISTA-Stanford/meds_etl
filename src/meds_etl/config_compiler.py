@@ -11,23 +11,33 @@ from meds_etl.config_integration import extract_column_names_from_template, is_t
 
 
 def _smart_split_pipes(s: str) -> List[str]:
-    """Split on pipes while respecting quotes/parentheses (used for transforms)."""
+    """Split on transform pipe operators while respecting quotes/parentheses.
+
+    Recognises ``>>`` (preferred) and ``|`` (backwards compat) as pipe
+    operators.  ``>>`` is checked first so that ``|`` can be reserved for
+    literal text separators in future DSL versions.
+    """
     parts = []
     current = ""
     depth = 0
     in_quotes = False
     quote_char = None
     escaped = False
+    i = 0
 
-    for char in s:
+    while i < len(s):
+        char = s[i]
+
         if escaped:
             current += char
             escaped = False
+            i += 1
             continue
 
         if char == "\\":
             current += char
             escaped = True
+            i += 1
             continue
 
         if char in ('"', "'"):
@@ -38,6 +48,7 @@ def _smart_split_pipes(s: str) -> List[str]:
                 in_quotes = False
                 quote_char = None
             current += char
+            i += 1
             continue
 
         if not in_quotes:
@@ -45,12 +56,19 @@ def _smart_split_pipes(s: str) -> List[str]:
                 depth += 1
             elif char == ")":
                 depth = max(depth - 1, 0)
-            elif char == "|" and depth == 0:
+            elif depth == 0 and char == ">" and i + 1 < len(s) and s[i + 1] == ">":
                 parts.append(current.strip())
                 current = ""
+                i += 2
+                continue
+            elif depth == 0 and char == "|":
+                parts.append(current.strip())
+                current = ""
+                i += 1
                 continue
 
         current += char
+        i += 1
 
     if current.strip():
         parts.append(current.strip())
@@ -415,23 +433,31 @@ def _compile_table_config(table_config: Dict[str, Any]) -> Dict[str, Any]:
                 value = new_prop["value"]
                 if isinstance(value, str):
                     omop_match = re.match(r"^\$omop:@([a-zA-Z_][a-zA-Z0-9_]*)$", value)
-                    simple_column = value.startswith("@") and not any(c in value for c in ["||", "$", "{", "}", "|"])
+                    literal_match = re.match(r"^\$literal:(.*)$", value, re.DOTALL)
+                    simple_column = value.startswith("@") and not any(
+                        c in value for c in ["||", "$", "{", "}", "|", ">>"]
+                    )
 
                     if omop_match:
                         col_name = omop_match.group(1)
                         new_prop["concept_lookup_field"] = col_name
                         del new_prop["value"]
+                    elif literal_match:
+                        new_prop["literal"] = literal_match.group(1)
+                        del new_prop["value"]
                     elif simple_column:
                         col_name = value[1:]
                         new_prop["source"] = col_name
                         del new_prop["value"]
-                    elif not is_template_syntax(value):
-                        # Literal value - convert to old "literal" format
-                        new_prop["literal"] = value
-                        del new_prop["value"]
-                    # else: complex template - leave as-is
+                    elif is_template_syntax(value):
+                        pass  # complex template - leave as-is for runtime
+                    else:
+                        raise ValueError(
+                            f"Ambiguous property value '{value}' for property "
+                            f"'{new_prop.get('name', '?')}'. Use '@{value}' for a "
+                            f"column reference or '$literal:{value}' for a literal string."
+                        )
                 else:
-                    # Literal value - convert to old "literal" format
                     new_prop["literal"] = value
                     del new_prop["value"]
 
@@ -440,12 +466,132 @@ def _compile_table_config(table_config: Dict[str, Any]) -> Dict[str, Any]:
 
     # Compile numeric/text value fields
     def compile_value_field(key: str, target_key: str):
-        if key in compiled:
-            value = compiled.pop(key)
-            if isinstance(value, str) and value.startswith("@") and not any(c in value for c in ["||", "$", "{", "|"]):
-                compiled[target_key] = value[1:]
+        if key not in compiled:
+            return
+        value = compiled[key]
+        if isinstance(value, str) and value.startswith("@") and not any(c in value for c in ["||", "$", "{", "|"]):
+            # Simple @column reference
+            compiled[target_key] = value[1:]
+            del compiled[key]
+        elif isinstance(value, str) and is_template_syntax(value):
+            # $omop: concept lookup → resolve via concept join
+            omop_match = re.match(r"^\$omop:@([a-zA-Z_][a-zA-Z0-9_]*)$", value)
+            if omop_match:
+                compiled[f"{target_key}_concept_lookup"] = omop_match.group(1)
+                del compiled[key]
+            elif "||" in value:
+                # Fallback chain of @column references
+                parts = [p.strip() for p in value.split("||")]
+                columns = []
+                for part in parts:
+                    col_match = re.match(r"^@([a-zA-Z_][a-zA-Z0-9_]*)$", part.strip())
+                    if col_match:
+                        columns.append(col_match.group(1))
+                if columns:
+                    compiled[target_key] = columns[0]
+                    if len(columns) > 1:
+                        compiled[f"{target_key}_fallbacks"] = columns[1:]
+                    del compiled[key]
+            # else: leave in place for runtime handling
 
     compile_value_field("numeric_value", "numeric_value_field")
     compile_value_field("text_value", "text_value_field")
 
+    # Compile filter expressions
+    if "filter" in compiled:
+        raw_filter = compiled["filter"]
+        if isinstance(raw_filter, str):
+            compiled["_compiled_filter"] = compile_filter_expression(raw_filter)
+        elif isinstance(raw_filter, list):
+            compiled["_compiled_filter"] = raw_filter
+        # else: pass through as-is
+
     return compiled
+
+
+# ============================================================================
+# FILTER EXPRESSION COMPILER
+# ============================================================================
+
+# Supported operators for filter expressions
+_FILTER_OPS = ["!=", ">=", "<=", "==", ">", "<"]
+
+
+def compile_filter_expression(expr: str) -> List[Dict[str, Any]]:
+    """Compile a filter expression string into structured conditions.
+
+    Supports:
+      - ``@field != value``
+      - ``@field == value``
+      - ``@field > value`` / ``@field < value`` / ``@field >= value`` / ``@field <= value``
+      - ``@field IS NOT NULL`` / ``@field IS NULL``
+      - ``@field IN (value1, value2, ...)``
+      - Multiple conditions joined with ``AND``
+
+    Returns a list of condition dicts, all implicitly AND-ed together.
+    """
+    conditions: List[Dict[str, Any]] = []
+
+    # Split on AND (case-insensitive, whole-word)
+    parts = re.split(r"\s+AND\s+", expr, flags=re.IGNORECASE)
+
+    for part in parts:
+        part = part.strip()
+        condition = _parse_single_condition(part)
+        if condition:
+            conditions.append(condition)
+
+    return conditions
+
+
+def _parse_single_condition(s: str) -> Optional[Dict[str, Any]]:
+    """Parse a single filter condition."""
+    s = s.strip()
+
+    # IS NOT NULL
+    match = re.match(r"^@([a-zA-Z_][a-zA-Z0-9_]*)\s+IS\s+NOT\s+NULL$", s, re.IGNORECASE)
+    if match:
+        return {"field": match.group(1), "op": "is_not_null"}
+
+    # IS NULL
+    match = re.match(r"^@([a-zA-Z_][a-zA-Z0-9_]*)\s+IS\s+NULL$", s, re.IGNORECASE)
+    if match:
+        return {"field": match.group(1), "op": "is_null"}
+
+    # IN (val1, val2, ...)
+    match = re.match(r"^@([a-zA-Z_][a-zA-Z0-9_]*)\s+IN\s*\(([^)]+)\)$", s, re.IGNORECASE)
+    if match:
+        field = match.group(1)
+        values_str = match.group(2)
+        values = [_parse_filter_value(v.strip()) for v in values_str.split(",")]
+        return {"field": field, "op": "in", "value": values}
+
+    # Comparison operators: !=, >=, <=, ==, >, <
+    for op in _FILTER_OPS:
+        pattern = rf"^@([a-zA-Z_][a-zA-Z0-9_]*)\s*{re.escape(op)}\s*(.+)$"
+        match = re.match(pattern, s)
+        if match:
+            field = match.group(1)
+            value = _parse_filter_value(match.group(2).strip())
+            return {"field": field, "op": op, "value": value}
+
+    return None
+
+
+def _parse_filter_value(s: str) -> Any:
+    """Parse a value from a filter expression (int, float, or string)."""
+    s = s.strip()
+    # Quoted string
+    if (s.startswith("'") and s.endswith("'")) or (s.startswith('"') and s.endswith('"')):
+        return s[1:-1]
+    # Integer
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    # Float
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    return s

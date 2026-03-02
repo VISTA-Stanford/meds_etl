@@ -214,7 +214,7 @@ def test_shuffle_polars(tmp_path: pathlib.Path):
         assert comparison == data
 
 
-@pytest.mark.skipif(meds_etl_cpp is None, reason="meds_etl_cpp not available (not supported on macOS)")
+@pytest.mark.skipif(meds_etl_cpp is None, reason="meds_etl_cpp not installed")
 def test_shuffle_cpp(tmp_path: pathlib.Path):
     meds_dataset = tmp_path / "meds"
     create_dataset(meds_dataset)

@@ -1,19 +1,28 @@
 """
 Template parser for OMOP ETL configuration files.
 
-This module provides parsing for the new templated configuration syntax:
+This module provides **parsing only** — it produces an AST from the templated
+configuration syntax.  Actual execution happens via the compilation path in
+``config_compiler.py`` → ``omop_common.py``.  The ``PolarsExpressionBuilder``
+is provided for introspection and validation; it does **not** implement
+vocabulary lookups and should not be used as a production execution backend.
+
+Supported syntax:
 - @column_name: Column references
 - $vocab:@column: Vocabulary lookups from column values
 - $vocab:123: Vocabulary lookups from literal values
+- $literal:value: Explicit literal string values
 - {template}: Template expressions
 - ||: Fallback chains
-- | function(): Pipe-style transforms
+- >> function(): Pipe-style transforms (preferred)
+- | function(): Pipe-style transforms (backwards compat)
 
 Examples:
     "@drug_exposure_start_datetime || @drug_exposure_start_date"
     "$omop:@drug_type_concept_id"
-    "IMAGE/{@modality_source_value}|{@anatomic_site_source_value}"
-    "{@note_title | regex_replace('\\s+', '-')}"
+    "IMAGE/{@modality_source_value}-{@anatomic_site_source_value}"
+    "{@note_title >> regex_replace('\\\\s+', '-')}"
+    "$literal:person"
 """
 
 import re
@@ -101,8 +110,8 @@ class TemplateParser:
     # Match template expressions: {anything}
     TEMPLATE_EXPR = re.compile(r"\{([^}]+)\}")
 
-    # Match transform pipes: | function(args)
-    TRANSFORM_SPLIT = re.compile(r"\s*\|\s*")
+    # Match transform pipes: >> function(args)  [preferred]  or  | function(args)  [compat]
+    TRANSFORM_SPLIT = re.compile(r"\s*(?:>>|\|)\s*")
     TRANSFORM_FUNC = re.compile(r"^([a-zA-Z_][a-zA-Z0-9_]*)\s*\(([^)]*)\)$")
 
     def __init__(self, default_vocab: str = "omop", default_attribute: str = "concept_name"):
@@ -219,42 +228,63 @@ class TemplateParser:
         return Expression(expr=base_expr, transforms=transforms)
 
     def _smart_split_pipes(self, s: str) -> List[str]:
-        """Split on pipes, respecting quotes and parentheses."""
+        """Split on transform pipe operators, respecting quotes and parentheses.
+
+        Recognises ``>>`` (preferred) and ``|`` (backwards compat) as pipe
+        operators.  ``>>`` is checked first so that ``|`` can be reserved for
+        literal text separators in future DSL versions.
+        """
         parts = []
         current = ""
         depth = 0
         in_quotes = False
         quote_char = None
+        i = 0
 
-        for char in s:
+        while i < len(s):
+            char = s[i]
+
             if char in ('"', "'") and not in_quotes:
                 in_quotes = True
                 quote_char = char
                 current += char
-            elif char == quote_char and in_quotes:
+                i += 1
+            elif in_quotes and char == quote_char:
                 in_quotes = False
                 quote_char = None
                 current += char
+                i += 1
             elif char == "(" and not in_quotes:
                 depth += 1
                 current += char
+                i += 1
             elif char == ")" and not in_quotes:
                 depth -= 1
                 current += char
-            elif char == "|" and not in_quotes and depth == 0:
+                i += 1
+            elif not in_quotes and depth == 0 and char == ">" and i + 1 < len(s) and s[i + 1] == ">":
                 parts.append(current.strip())
                 current = ""
+                i += 2
+            elif not in_quotes and depth == 0 and char == "|":
+                parts.append(current.strip())
+                current = ""
+                i += 1
             else:
                 current += char
+                i += 1
 
         if current.strip():
             parts.append(current.strip())
 
         return parts
 
+    # Match explicit literal: $literal:value
+    LITERAL_PREFIX = re.compile(r"^\$literal:(.*)$", re.DOTALL)
+
     def _parse_base_expression(self, s: str) -> Union[ColumnRef, VocabLookup, LiteralValue]:
         """
-        Parse base expression (column ref, vocab lookup, or literal).
+        Parse base expression (column ref, vocab lookup, explicit literal, or bare literal).
 
         Args:
             s: Expression string
@@ -266,6 +296,11 @@ class TemplateParser:
         match = self.COLUMN_REF.match(s)
         if match:
             return ColumnRef(match.group(1))
+
+        # Try explicit literal: $literal:value
+        match = self.LITERAL_PREFIX.match(s)
+        if match:
+            return LiteralValue(match.group(1))
 
         # Try vocabulary lookup: $vocab:source:attribute
         match = self.VOCAB_LOOKUP.match(s)
@@ -363,10 +398,12 @@ class TemplateParser:
 
 class PolarsExpressionBuilder:
     """
-    Build Polars expressions from parsed templates.
+    Build Polars expressions from parsed templates (for introspection/validation).
 
-    This class converts the parsed template objects into Polars expressions
-    that can be executed efficiently on DataFrames.
+    This builder converts parsed AST nodes into Polars expressions for
+    validation and testing.  It does **not** implement vocabulary lookups;
+    production execution goes through the compilation path
+    (``config_compiler.compile_config`` → ``omop_common.transform_to_meds_unsorted``).
     """
 
     def __init__(self, concept_df: Optional[pl.DataFrame] = None, default_vocab: str = "omop"):
@@ -484,16 +521,12 @@ class PolarsExpressionBuilder:
         else:
             raise ValueError(f"Unknown lookup source type: {type(lookup.source)}")
 
-        # If concept_df is not provided, we can't do the lookup
-        # For now, just return the source expression
-        # In a real implementation, this would do a join with the concept table
-        if self.concept_df is None:
-            # Return source as-is if no concept_df
-            # This allows parsing to work even without vocabulary data
-            return source_expr
-
-        # TODO: Implement actual vocabulary lookup with join
-        # This would join with concept_df on concept_id and return the requested attribute
+        # Vocabulary lookups are intentionally NOT implemented here.
+        # Production execution uses the compilation path:
+        #   config_compiler.compile_config → omop_common.transform_to_meds_unsorted
+        # which resolves concept IDs via DataFrame joins at runtime.
+        # This builder returns the source expression unchanged for
+        # introspection/validation purposes.
         return source_expr
 
     def _apply_transform(self, expr: pl.Expr, transform: Transform) -> pl.Expr:
@@ -535,7 +568,13 @@ class PolarsExpressionBuilder:
                 raise ValueError(f"substring requires 1 or 2 arguments, got {len(args)}")
 
         elif func_name == "split":
-            if len(args) == 2:
+            if len(args) == 3:
+                delimiter = args[0]
+                index = int(args[1])
+                default = args[2]
+                split_expr = expr.str.split(delimiter).list.get(index, null_on_oob=True)
+                return pl.when(split_expr.is_null() | (split_expr == "")).then(pl.lit(default)).otherwise(split_expr)
+            elif len(args) == 2:
                 delimiter = args[0]
                 index = int(args[1])
                 return expr.str.split(delimiter).list.get(index, null_on_oob=True)
@@ -543,7 +582,7 @@ class PolarsExpressionBuilder:
                 delimiter = args[0]
                 return expr.str.split(delimiter)
             else:
-                raise ValueError(f"split requires 1 or 2 arguments, got {len(args)}")
+                raise ValueError(f"split requires 1-3 arguments, got {len(args)}")
 
         else:
             raise ValueError(f"Unknown transform function: {func_name}")
