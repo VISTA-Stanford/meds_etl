@@ -92,7 +92,7 @@ This uses a two-phase external sort (partition → k-way merge) that stays memor
 
 ## Configuration
 
-The JSON config file tells the ETL **which OMOP tables to process** and **how to transform each row into a MEDS event**. 
+The JSON config file tells the ETL **which OMOP tables to process** and **how to transform each row into a MEDS event**.
 
 **Example** — process the `measurement` table, look up concept IDs in the OMOP concept table to get standardized codes like `LOINC/12345-6`:
 
@@ -108,7 +108,32 @@ The JSON config file tells the ETL **which OMOP tables to process** and **how to
 }
 ```
 
-The `$omop:` prefix triggers a join with the OMOP `concept` table, producing codes in `vocabulary_id/concept_code` format.
+### DSL Quick Reference
+
+| Syntax | Meaning | Example |
+|--------|---------|---------|
+| `@column` | Column reference | `@measurement_datetime` |
+| `$omop:@col` | OMOP concept lookup | `$omop:@measurement_concept_id` |
+| `$literal:value` | Explicit literal string | `$literal:measurement` |
+| `@col1 \|\| @col2` | Fallback (first non-null) | `@measurement_datetime \|\| @measurement_date` |
+| `{@col >> transform()}` | Transform pipe | `{@note_title >> regex_replace('\\s+', '-')}` |
+| `"filter"` | Row-level filtering | `"@concept_id != 0"` |
+
+- **`$omop:` prefix** triggers a join with the OMOP `concept` table, producing codes in `vocabulary_id/concept_code` format.
+- **`$literal:`** must be used for literal string values in properties. Bare strings (without `@` or `$literal:`) are treated as errors.
+- **`>>`** is the preferred transform pipe operator inside `{...}` braces. (`|` is still supported for backward compatibility but `>>` avoids ambiguity with the `||` fallback operator.)
+- **Transforms:** `split(delim, index[, default])`, `regex_replace(pattern, replacement)`, `upper()`, `lower()`, `strip()`
+- **Config validation** runs automatically at load time, catching typos in field names, missing required fields, and invalid syntax before the ETL starts.
+
+### Config Validation
+
+Configs are automatically validated at load time. The validator checks:
+
+- Unknown or misspelled keys (e.g., `time_sart` instead of `time_start`)
+- Missing required fields (`time_start`, `code`)
+- Invalid property types
+- DSL syntax errors (unbalanced braces, unknown vocabulary prefixes)
+- Ambiguous bare string literals in properties (must use `$literal:`)
 
 ## Testing
 

@@ -212,9 +212,9 @@ The docs mention a migration tool from old to new config format as future work. 
 
 `omop_legacy.py` supports CSV input but `omop.py` and `omop_streaming.py` only support Parquet. Users with CSV exports must convert first.
 
-### 4.5 Missing `examples/README.md`
+### ~~4.5 Missing `examples/README.md`~~ **Fixed**
 
-Referenced in `README.md` but does not exist in the repository.
+~~Referenced in `README.md` but does not exist in the repository.~~ Created with full DSL reference documentation.
 
 ### 4.6 Incremental / resume support
 
@@ -292,31 +292,31 @@ This could be validated at config load time (zero cost, high value).
 
 ### 7.1 Short-term (non-breaking)
 
-| Proposal | Effort | Impact |
-|---|---|---|
-| Document `|` scoping rules (literal outside `{}`, pipe inside) | Low | Reduces user confusion |
-| Add `split(delim, idx, default)` to `config_parser.py` | Low | Feature parity with compiled path |
-| Support `text_value` / `numeric_value` with full DSL | Medium | Fixes silent data loss |
-| Add JSON Schema for config validation | Medium | Catches config errors early |
-| Warn when property `"value"` looks like a column name without `@` | Low | Prevents common mistake |
+| Proposal | Effort | Impact | Status |
+|---|---|---|---|
+| Document `|` scoping rules (literal outside `{}`, pipe inside) | Low | Reduces user confusion | **Done** — `>>` introduced as preferred pipe, documented in README and examples/README.md |
+| Add `split(delim, idx, default)` to `config_parser.py` | Low | Feature parity with compiled path | **Done** — 3-arg `split()` supported in both parser and compiler |
+| Support `text_value` / `numeric_value` with full DSL | Medium | Fixes silent data loss | Open |
+| Add JSON Schema for config validation | Medium | Catches config errors early | **Done** — `config_schema.py` validates at load time |
+| Warn when property `"value"` looks like a column name without `@` | Low | Prevents common mistake | **Done** — bare strings now raise errors; `$literal:` required |
 
 ### 7.2 Medium-term (minor DSL evolution)
 
-| Proposal | Effort | Impact |
-|---|---|---|
-| Add `"filter"` key for row-level filtering | Medium | Addresses common ETL need |
-| Add `"subject_id"` as a table-level DSL key (currently only `"subject_id_field"`) | Low | Consistency with other fields |
-| Support list-of-events per table for multi-event emission | Medium | Handles complex OMOP patterns |
-| Add `$literal:value` syntax for explicit literals in ambiguous contexts | Low | Eliminates literal vs. column ambiguity |
+| Proposal | Effort | Impact | Status |
+|---|---|---|---|
+| Add `"filter"` key for row-level filtering | Medium | Addresses common ETL need | **Done** — `filter` key on table configs, compiled and applied at runtime |
+| Add `"subject_id"` as a table-level DSL key (currently only `"subject_id_field"`) | Low | Consistency with other fields | Open |
+| Support list-of-events per table for multi-event emission | Medium | Handles complex OMOP patterns | Deferred |
+| Add `$literal:value` syntax for explicit literals in ambiguous contexts | Low | Eliminates literal vs. column ambiguity | **Done** — all example configs updated |
 
 ### 7.3 Long-term (breaking changes, major version)
 
-| Proposal | Effort | Impact |
-|---|---|---|
-| Replace `||` fallback with `coalesce(@a, @b)` function syntax | High | More explicit, avoids overloading `\|\|` |
-| Unify `code`, `text_value`, `numeric_value` under a single expression grammar | High | Eliminates per-field compilation quirks |
-| Replace the compile-to-old-format pipeline with direct AST → Polars execution | High | Eliminates entire class of round-trip bugs |
-| YAML config support (alongside JSON) for better readability | Medium | Developer ergonomics |
+| Proposal | Effort | Impact | Status |
+|---|---|---|---|
+| Replace `||` fallback with `coalesce(@a, @b)` function syntax | High | More explicit, avoids overloading `\|\|` | Open |
+| Unify `code`, `text_value`, `numeric_value` under a single expression grammar | High | Eliminates per-field compilation quirks | Open |
+| Replace the compile-to-old-format pipeline with direct AST → Polars execution | High | Eliminates entire class of round-trip bugs | Open |
+| YAML config support (alongside JSON) for better readability | Medium | Developer ergonomics | Open |
 
 ---
 
@@ -330,11 +330,21 @@ This could be validated at config load time (zero cost, high value).
 ### P1 — Fix soon
 4. Extract shared code from `omop.py` / `omop_streaming.py` (Section 6.1)
 5. Select only needed columns in concept joins (Section 1.6)
-6. Add `split(delim, idx, default)` to `config_parser.py` (Section 3.2)
-7. Create `examples/README.md` (Section 4.5)
+6. ~~Add `split(delim, idx, default)` to `config_parser.py` (Section 3.2)~~ **Done**
+7. ~~Create `examples/README.md` (Section 4.5)~~ **Done**
 
 ### P2 — Improve
-8. Add JSON Schema for config validation (Section 6.4)
+8. ~~Add JSON Schema for config validation (Section 6.4)~~ **Done** — `config_schema.py`
 9. Implement config validation CLI (Section 4.1)
 10. Add end-to-end tests using example configs (Section 5)
-11. Resolve or remove the `PolarsExpressionBuilder` vocab lookup TODO (Section 6.2)
+11. ~~Resolve or remove the `PolarsExpressionBuilder` vocab lookup TODO (Section 6.2)~~ **Done** — documented as intentionally unimplemented; production uses compile path
+
+### Implemented since initial review
+- **`>>` pipe operator**: Preferred transform pipe, replacing `|` inside `{...}` to avoid ambiguity with `||` fallback
+- **`$literal:` syntax**: Required for literal string values in properties; bare strings raise errors
+- **`filter` key**: Row-level filtering on table configs with `AND`-combined conditions
+- **Config schema validation**: Structural validation at config load time (`config_schema.py`)
+- **Vocabulary abstraction**: `VocabularyProvider` ABC + `OMOPVocabularyProvider` in `vocabulary.py`
+- **`split()` 3-arg form**: Feature parity between parser and compiler
+- **Example configs**: All three configs updated to new syntax (`>>`, `$literal:`)
+- **`examples/README.md`**: Comprehensive config documentation created
