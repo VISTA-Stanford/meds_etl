@@ -7,22 +7,12 @@
 
 <div align="center">
 
-  <a href="https://www.python.org/downloads/">
-    <img src="https://img.shields.io/badge/python-%3E3.10-blue" alt="Python > 3.10">
-  </a>
-  <a href="https://github.com/Medical-Event-Data-Standard/meds_etl/actions/workflows/python-test.yml">
-    <img src="https://github.com/Medical-Event-Data-Standard/meds_etl/actions/workflows/python-test.yml/badge.svg?branch=main" alt="Tests">
-  </a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-%3E3.10-blue" alt="Python > 3.10"></a>
+  <a href="https://github.com/VISTA-Stanford/meds_etl/actions/workflows/python-test.yml"><img src="https://github.com/VISTA-Stanford/meds_etl/actions/workflows/python-test.yml/badge.svg?branch=main" alt="Tests"></a>
   <img src="https://img.shields.io/badge/MEDS-0.3.3-blue" alt="MEDS 0.3.3">
-  <a href="https://github.com/Medical-Event-Data-Standard/meds_etl/graphs/commit-activity">
-    <img src="https://img.shields.io/badge/Maintained%3F-yes-green.svg" alt="Maintained">
-  </a>
-  <a href="https://github.com/psf/black">
-    <img src="https://img.shields.io/badge/code%20style-black-000000.svg" alt="Code style: black">
-  </a>
-  <a href="https://github.com/Medical-Event-Data-Standard/meds_etl/blob/main/LICENSE">
-    <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0">
-  </a>
+  <a href="https://github.com/VISTA-Stanford/meds_etl/graphs/commit-activity"><img src="https://img.shields.io/badge/Maintained%3F-yes-green.svg" alt="Maintained"></a>
+  <a href="https://github.com/psf/black"><img src="https://img.shields.io/badge/code%20style-black-000000.svg" alt="Code style: black"></a>
+  <a href="https://github.com/VISTA-Stanford/meds_etl/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
 
 </div>
 
@@ -53,7 +43,7 @@ uv sync --extra cpp
 uv run python -m meds_etl.omop \
   --omop_dir /path/to/omop \
   --output_dir /path/to/meds \
-  --config examples/omop_etl_vista_std_concepts.json\
+  --config examples/omop_etl_vista_std_concepts.json \
   --workers 10 \
   --shards 10 \
   --backend cpp \
@@ -117,7 +107,7 @@ The JSON config file tells the ETL **which OMOP tables to process** and **how to
 | `$literal:value` | Explicit literal string | `$literal:measurement` |
 | `@col1 \|\| @col2` | Fallback (first non-null) | `@measurement_datetime \|\| @measurement_date` |
 | `{@col >> transform()}` | Transform pipe | `{@note_title >> regex_replace('\\s+', '-')}` |
-| `"filter"` | Row-level filtering | `"@concept_id != 0"` |
+| `filter` | Row-level filtering | `"@concept_id != 0"` |
 
 - **`$omop:` prefix** triggers a join with the OMOP `concept` table, producing codes in `vocabulary_id/concept_code` format.
 - **`$literal:`** must be used for literal string values in properties. Bare strings (without `@` or `$literal:`) are treated as errors.
@@ -149,10 +139,10 @@ uv run pytest
   title = {MEDS ETL: Scalable pipelines for OMOP to MEDS conversion},
   author = {{MEDS Development Team}},
   year = {2024},
-  url = {https://github.com/Medical-Event-Data-Standard/meds_etl}
+  url = {https://github.com/VISTA-Stanford/meds_etl}
 }
 ```
 
 ## Links
 
-[MEDS Standard](https://github.com/Medical-Event-Data-Standard/meds) · [Issues](https://github.com/Medical-Event-Data-Standard/meds_etl/issues) · [License](LICENSE)
+[MEDS Standard](https://github.com/Medical-Event-Data-Standard/meds) · [Issues](https://github.com/VISTA-Stanford/meds_etl/issues) · [License](LICENSE)
