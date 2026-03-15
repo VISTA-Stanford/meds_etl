@@ -1136,6 +1136,146 @@ class TestRelationshipResolution:
         errors = validate_config_schema(config)
         assert any("foobar" in e for e in errors)
 
+    def test_fallback_concept_id_when_column_is_zero(self, concept_df, meds_schema):
+        """fallback_concept_id kicks in when concept_id column is 0 (OMOP unmapped)."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1, 2],
+                "note_datetime": [
+                    datetime.datetime(2024, 1, 1),
+                    datetime.datetime(2024, 1, 2),
+                ],
+                # Row 1: concept_id=0 (unmapped) → should fall back to 3001 (LOINC/2339-0)
+                # Row 2: concept_id=4001 (valid) → should use directly
+                "note_class_concept_id": [0, 4001],
+            }
+        )
+
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "note_class_concept_id",
+                    "fallback_concept_id": 3001,
+                }
+            },
+            "time_start": "note_datetime",
+        }
+
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+        )
+
+        codes = result["code"].to_list()
+        assert len(result) == 2
+        # Row 1: concept_id 0 → fallback 3001 → LOINC/2339-0
+        assert codes[0] == "LOINC/2339-0"
+        # Row 2: concept_id 4001 → CPT4/99213
+        assert codes[1] == "CPT4/99213"
+
+    def test_fallback_concept_id_when_column_is_null(self, concept_df, meds_schema):
+        """fallback_concept_id also kicks in when concept_id column is null."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1],
+                "note_datetime": [datetime.datetime(2024, 1, 1)],
+                "note_class_concept_id": pl.Series([None], dtype=pl.Int64),
+            }
+        )
+
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "note_class_concept_id",
+                    "fallback_concept_id": 3001,
+                }
+            },
+            "time_start": "note_datetime",
+        }
+
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+        )
+
+        codes = result["code"].to_list()
+        assert len(result) == 1
+        assert codes[0] == "LOINC/2339-0"
+
+    def test_fallback_concept_id_source_only_zero(self, concept_df, meds_schema):
+        """fallback_concept_id works when source_concept_id_field is 0."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1],
+                "measurement_datetime": [datetime.datetime(2024, 1, 1)],
+                "measurement_source_concept_id": pl.Series([0], dtype=pl.Int64),
+            }
+        )
+
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "source_concept_id_field": "measurement_source_concept_id",
+                    "fallback_concept_id": 3001,
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+        )
+
+        codes = result["code"].to_list()
+        assert len(result) == 1
+        assert codes[0] == "LOINC/2339-0"
+
+    def test_fallback_concept_id_dual_column_zero(self, concept_df, relationship_map_df, meds_schema):
+        """fallback_concept_id works in dual-column path when concept_id is 0."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1],
+                "measurement_datetime": [datetime.datetime(2024, 1, 1)],
+                "measurement_concept_id": [0],
+                "measurement_source_concept_id": pl.Series([0], dtype=pl.Int64),
+            }
+        )
+
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id",
+                    "source_concept_id_field": "measurement_source_concept_id",
+                    "fallback_concept_id": 3001,
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            relationship_map_df=relationship_map_df,
+        )
+
+        codes = result["code"].to_list()
+        assert len(result) == 1
+        # concept_id=0 → fallback 3001 → LOINC/2339-0
+        assert codes[0] == "LOINC/2339-0"
+
     def test_exempt_codes_rescues_non_standard(self, concept_df, meds_schema):
         """exempt_codes allows specific non-standard codes through the standard_only filter."""
         df = pl.DataFrame(

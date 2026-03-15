@@ -1117,26 +1117,40 @@ def transform_to_meds_unsorted(
                 # source_concept_id coalesces over it.
                 if source_concept_id_field and concept_id_field:
                     base_exprs.append(pl.col(source_concept_id_field).cast(pl.Int64).alias("_source_concept_id"))
-                    base_exprs.append(pl.col(concept_id_field).cast(pl.Int64).alias("concept_id"))
+                    concept_expr = pl.col(concept_id_field).cast(pl.Int64)
                     if fallback_concept_id is not None:
+                        concept_expr = (
+                            pl.when((concept_expr.is_not_null()) & (concept_expr != 0))
+                            .then(concept_expr)
+                            .otherwise(pl.lit(fallback_concept_id).cast(pl.Int64))
+                        )
+                        base_exprs.append(concept_expr.alias("concept_id"))
                         base_exprs.append(pl.lit(fallback_concept_id).cast(pl.Int64).alias("_fallback_concept_id"))
-                elif source_concept_id_field:
-                    exprs_to_coalesce = [pl.col(source_concept_id_field).cast(pl.Int64)]
-                    if fallback_concept_id is not None:
-                        exprs_to_coalesce.append(pl.lit(fallback_concept_id).cast(pl.Int64))
-                    if len(exprs_to_coalesce) > 1:
-                        base_exprs.append(pl.coalesce(exprs_to_coalesce).alias("concept_id"))
                     else:
-                        base_exprs.append(exprs_to_coalesce[0].alias("concept_id"))
+                        base_exprs.append(concept_expr.alias("concept_id"))
+                elif source_concept_id_field:
+                    col_expr = pl.col(source_concept_id_field).cast(pl.Int64)
+                    if fallback_concept_id is not None:
+                        base_exprs.append(
+                            pl.when((col_expr.is_not_null()) & (col_expr != 0))
+                            .then(col_expr)
+                            .otherwise(pl.lit(fallback_concept_id).cast(pl.Int64))
+                            .alias("concept_id")
+                        )
+                    else:
+                        base_exprs.append(col_expr.alias("concept_id"))
                 elif concept_id_field:
                     _single_join_is_standard_anchor = True
-                    exprs_to_coalesce = [pl.col(concept_id_field).cast(pl.Int64)]
+                    col_expr = pl.col(concept_id_field).cast(pl.Int64)
                     if fallback_concept_id is not None:
-                        exprs_to_coalesce.append(pl.lit(fallback_concept_id).cast(pl.Int64))
-                    if len(exprs_to_coalesce) > 1:
-                        base_exprs.append(pl.coalesce(exprs_to_coalesce).alias("concept_id"))
+                        base_exprs.append(
+                            pl.when((col_expr.is_not_null()) & (col_expr != 0))
+                            .then(col_expr)
+                            .otherwise(pl.lit(fallback_concept_id).cast(pl.Int64))
+                            .alias("concept_id")
+                        )
                     else:
-                        base_exprs.append(exprs_to_coalesce[0].alias("concept_id"))
+                        base_exprs.append(col_expr.alias("concept_id"))
 
                     # Auto-detect companion source_concept_id column for
                     # relationship resolution.  OMOP convention:
