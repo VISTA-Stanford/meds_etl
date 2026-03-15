@@ -43,6 +43,7 @@ This directory contains example JSON configs for converting OMOP CDM data to MED
 | `numeric_value` | No | Column reference for numeric values |
 | `text_value` | No | Column reference for text values |
 | `filter` | No | Row-level filter expression (e.g., `@concept_id != 0`) |
+| `exempt_codes` | No | List of code strings that bypass the `standard_only` filter |
 | `properties` | No | Array of additional properties to extract |
 
 ### Property Objects
@@ -160,6 +161,22 @@ For multiple predicates combined with OR, use a list of strings:
 | List of strings | Each string is a predicate; all ORed together (keep row if ANY matches) |
 
 Supported filter operators: `!=`, `==`, `>`, `<`, `>=`, `<=`, `IS NULL`, `IS NOT NULL`, `IN (...)`. Combine conditions with `AND` or `OR`.
+
+### Exempt Codes
+
+When `standard_only: true` is set in the vocabulary config, non-standard concepts are dropped. Use `exempt_codes` on a table to allow specific non-standard codes through:
+
+```json
+"observation": {
+    "code": "$omop:@observation_concept_id",
+    "exempt_codes": ["LOINC/LP21258-6"],
+    "filter": [
+        "@value_as_number IS NOT NULL OR @value_as_string IS NOT NULL"
+    ]
+}
+```
+
+This is useful when upstream OMOP mapping assigns a non-standard concept (e.g., a LOINC hierarchy node) that is still clinically meaningful and needed for downstream compatibility (e.g., tokenizer vocabularies). Exempt codes bypass the `standard_only` filter but are still resolved through the concept table — they are a last resort after standard concept lookup and relationship resolution both fail.
 
 ## Choosing a Code Strategy
 

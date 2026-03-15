@@ -1299,6 +1299,20 @@ def transform_to_meds_unsorted(
             )
             result = result.join(primary_join_df, on="concept_id", how="left")
 
+            # Unfiltered lookup for exempt_codes rescue in dual-column path
+            exempt_codes = table_config.get("exempt_codes", [])
+            if standard_only and exempt_codes and primary_concept_df is not concept_df:
+                unfiltered_join_df = concept_df.select(
+                    pl.col("concept_id").alias("_exempt_join_id"),
+                    pl.col(concept_join_field).alias("_exempt_code_candidate"),
+                )
+                result = result.join(
+                    unfiltered_join_df,
+                    left_on="concept_id",
+                    right_on="_exempt_join_id",
+                    how="left",
+                )
+
             source_join_df = concept_df.select(
                 pl.col("concept_id").alias("_src_join_id"),
                 pl.col(concept_join_field).alias(source_join_alias),
@@ -1350,7 +1364,29 @@ def transform_to_meds_unsorted(
                     pl.col(concept_join_field).alias(join_alias),
                 ]
             )
-            result = result.join(join_df, on="concept_id", how="left").drop("concept_id")
+            result = result.join(join_df, on="concept_id", how="left")
+
+            # When standard_only is filtering and exempt_codes are configured,
+            # also do an unfiltered lookup to rescue exempt codes.
+            exempt_codes = table_config.get("exempt_codes", [])
+            if (
+                standard_only
+                and _single_join_is_standard_anchor
+                and exempt_codes
+                and single_concept_df is not concept_df
+            ):
+                unfiltered_join_df = concept_df.select(
+                    pl.col("concept_id").alias("_exempt_join_id"),
+                    pl.col(concept_join_field).alias("_exempt_code_candidate"),
+                )
+                result = result.join(
+                    unfiltered_join_df,
+                    left_on="concept_id",
+                    right_on="_exempt_join_id",
+                    how="left",
+                )
+
+            result = result.drop("concept_id")
 
     # Perform relationship resolution (source_concept_id → "Maps to" → standard code)
     if relationship_map_df is not None and "_source_concept_id_for_resolution" in result.columns:
@@ -1419,6 +1455,19 @@ def transform_to_meds_unsorted(
         drop_cols = [alias for alias in available_candidates if alias != "code"]
         if drop_cols:
             result = result.drop(drop_cols)
+
+    # Rescue exempt codes: for rows where code is null but the unfiltered
+    # concept lookup produced a code in the exempt_codes set, use that code.
+    exempt_codes = table_config.get("exempt_codes", [])
+    if exempt_codes and "_exempt_code_candidate" in result.columns:
+        exempt_set = set(exempt_codes)
+        result = result.with_columns(
+            pl.when(pl.col("code").is_null() & pl.col("_exempt_code_candidate").is_in(exempt_set))
+            .then(pl.col("_exempt_code_candidate"))
+            .otherwise(pl.col("code"))
+            .alias("code")
+        )
+        result = result.drop("_exempt_code_candidate")
 
     # Filter out rows with null codes
     result = result.filter(pl.col("code").is_not_null())

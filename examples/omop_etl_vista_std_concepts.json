@@ -270,6 +270,9 @@
             "code": "$omop:@observation_concept_id",
             "numeric_value": "@value_as_number",
             "text_value": "@value_as_string",
+            "exempt_codes": [
+                "LOINC/LP21258-6"
+            ],
             "filter": [
                 "@value_as_number IS NOT NULL OR @value_as_string IS NOT NULL"
             ],

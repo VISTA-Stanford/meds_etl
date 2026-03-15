@@ -51,6 +51,7 @@ _EVENT_TABLE_KEYS = {
     "properties",
     "metadata",
     "filter",
+    "exempt_codes",
     # Compiled keys (produced by config_compiler, not user-written)
     "_compiled_filter",
 }
@@ -217,6 +218,12 @@ def _validate_event_or_table(
     # Validate filter syntax
     if "filter" in config:
         errors.extend(_validate_filter(config["filter"], f"{section} '{name}'"))
+
+    # Validate exempt_codes
+    if "exempt_codes" in config:
+        ec = config["exempt_codes"]
+        if not isinstance(ec, list) or not all(isinstance(c, str) for c in ec):
+            errors.append(f"{section} '{name}': 'exempt_codes' must be a list of strings")
 
     # Validate numeric_value / text_value
     for field_key in ("numeric_value", "text_value"):

@@ -103,6 +103,7 @@ The JSON config file tells the ETL **which OMOP tables to process** and **how to
 | `@col1 \|\| @col2` | Fallback (first non-null) | `@measurement_datetime \|\| @measurement_date` |
 | `{@col >> transform()}` | Transform pipe | `{@note_title >> regex_replace('\\s+', '-')}` |
 | `filter` | Row-level filtering | `"@concept_id != 0"` or `["pred1", "pred2"]` (ORed) |
+| `exempt_codes` | Bypass `standard_only` for specific codes | `["LOINC/LP21258-6"]` |
 | `vocabulary` | Concept resolution config (top-level) | `{"$omop": {"sources": [...], "standard_only": true}}` |
 
 - **`$omop:` prefix** triggers a join with the OMOP `concept` table, producing codes in `vocabulary_id/concept_code` format.
