@@ -516,11 +516,10 @@ def build_relationship_resolution_map(
 ) -> Optional[pl.DataFrame]:
     """Build a source_concept_id → resolved_code map from concept_relationship "Maps to" chains.
 
-    Only resolves custom/site-specific concepts (concept_id >= 2,000,000,000) — standard
-    OMOP concepts are already handled by the concept table directly. Loads the
-    concept_relationship table, filters to ``relationship_id = "Maps to"`` with custom
-    source concepts, joins the target concept_id against the concept table to get the
-    resolved code, and keeps only rows where the target is a standard concept
+    Resolves any non-standard source concept to a standard target concept. Loads the
+    concept_relationship table, filters to ``relationship_id = "Maps to"`` with
+    non-self-referencing pairs, joins the target concept_id against the concept table
+    to get the resolved code, and keeps only rows where the target is a standard concept
     (``standard_concept = 'S'``).
 
     For source concepts that map to multiple standard targets, the first is kept
@@ -553,7 +552,6 @@ def build_relationship_resolution_map(
         maps_to = df.filter(
             (pl.col("relationship_id") == "Maps to")
             & (pl.col("concept_id_1") != pl.col("concept_id_2"))
-            & (pl.col("concept_id_1") >= 2_000_000_000)
             & (pl.col("concept_id_2") > 0)
         ).select(
             source_concept_id=pl.col("concept_id_1").cast(pl.Int64),
