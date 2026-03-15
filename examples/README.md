@@ -203,9 +203,11 @@ The `vocabulary.$omop` config accepts either a shorthand list (`["concept"]`) or
 When `"concept_relationship"` is included, the ETL will:
 
 1. Load the `concept_relationship` table and filter to `relationship_id = "Maps to"` where the source concept is a custom/site-specific concept (concept_id >= 2,000,000,000)
-2. For any `$omop:` lookup with a `*_source_concept_id` that is a custom concept, look up the source concept in the relationship table
-3. If a standard target concept exists (where `standard_concept = 'S'`), use the resolved target's code
-4. Otherwise, fall back to the regular `concept` table lookup
+2. For any `$omop:@*_concept_id` lookup, **auto-detect** the companion `*_source_concept_id` column in the same table (e.g., `observation_concept_id` → `observation_source_concept_id`)
+3. Try the primary concept lookup first; if the concept is not found (or not standard when `standard_only` is true), walk the companion source concept ID through the "Maps to" chain
+4. If a standard target concept exists, use the resolved target's code; otherwise the row is dropped (null code)
+
+This auto-detection means you write `"code": "$omop:@observation_concept_id"` and the ETL automatically tries `observation_source_concept_id` for relationship resolution — no fallback syntax needed.
 
 This is strictly additive — standard OMOP concepts (concept_id < 2B) are always resolved directly through the `concept` table and are never affected by concept_relationship. The relationship resolution only kicks in for custom/site-specific concepts that would otherwise resolve to non-standard vocabulary codes (e.g., `STANFORD_MEAS/GLUCOSE` instead of `SNOMED/166900001`).
 

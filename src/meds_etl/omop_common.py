@@ -1137,6 +1137,17 @@ def transform_to_meds_unsorted(
                         base_exprs.append(pl.coalesce(exprs_to_coalesce).alias("concept_id"))
                     else:
                         base_exprs.append(exprs_to_coalesce[0].alias("concept_id"))
+
+                    # Auto-detect companion source_concept_id column for
+                    # relationship resolution.  OMOP convention:
+                    #   observation_concept_id → observation_source_concept_id
+                    #   condition_concept_id  → condition_source_concept_id
+                    if relationship_map_df is not None:
+                        companion = concept_id_field.replace("_concept_id", "_source_concept_id")
+                        if companion != concept_id_field and companion in df.columns:
+                            base_exprs.append(
+                                pl.col(companion).cast(pl.Int64).alias("_source_concept_id_for_resolution")
+                            )
                 else:
                     base_exprs.append(pl.lit(fallback_concept_id).cast(pl.Int64).alias("concept_id"))
 

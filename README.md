@@ -134,6 +134,8 @@ For OMOP datasets with site-specific custom concepts (e.g., Stanford), configure
 }
 ```
 
+When `concept_relationship` is included, the ETL **auto-detects** the companion `*_source_concept_id` column for each `$omop:@*_concept_id` lookup (e.g., `observation_concept_id` → `observation_source_concept_id`). If the primary concept lookup fails (or is non-standard when `standard_only` is true), the companion source concept is walked through "Maps to" chains to find a standard code.
+
 When `standard_only` is `true`, only standard OMOP concepts (`standard_concept = 'S'`) are emitted — non-standard concepts produce null codes and are filtered out.
 
 See [`examples/README.md`](examples/README.md#resolving-source-concepts-via-concept_relationship) for details.

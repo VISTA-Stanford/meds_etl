@@ -906,6 +906,132 @@ class TestRelationshipResolution:
         # source anchor → source code STANFORD_MEAS/GLUCOSE is acceptable
         assert codes[0] == "STANFORD_MEAS/GLUCOSE"
 
+    def test_auto_detect_source_concept_id_for_relationship(self, concept_df, relationship_map_df, meds_schema):
+        """When only concept_id_field is configured and relationship_map_df is provided,
+        the companion _source_concept_id column is auto-detected for relationship resolution."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1, 2, 3],
+                "measurement_datetime": [
+                    datetime.datetime(2024, 1, 1),
+                    datetime.datetime(2024, 1, 2),
+                    datetime.datetime(2024, 1, 3),
+                ],
+                # Row 1: non-standard concept_id, source has Maps to chain
+                # Row 2: standard concept_id, source doesn't matter
+                # Row 3: concept_id 0, source has Maps to chain
+                "measurement_concept_id": [1001, 3001, 0],
+                "measurement_source_concept_id": pl.Series([1001, 1001, 5001], dtype=pl.Int64),
+            }
+        )
+
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id",
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+
+        # With standard_only=True: concept 1001 is non-standard → filtered out by
+        # concept table join, but source 1001 → SNOMED/166900001 via relationship
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            relationship_map_df=relationship_map_df,
+            standard_only=True,
+        )
+
+        codes = result["code"].to_list()
+        assert len(result) == 3
+        # Row 1: concept_id 1001 not standard → null, relationship resolves source 1001 → SNOMED/166900001
+        assert codes[0] == "SNOMED/166900001"
+        # Row 2: concept_id 3001 standard → LOINC/2339-0
+        assert codes[1] == "LOINC/2339-0"
+        # Row 3: concept_id 0 → null, relationship resolves source 5001 → SNOMED/399208008
+        assert codes[2] == "SNOMED/399208008"
+
+    def test_auto_detect_no_companion_column(self, concept_df, relationship_map_df, meds_schema):
+        """When the companion _source_concept_id column doesn't exist in the DataFrame,
+        auto-detection doesn't fire and relationship resolution is skipped."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1],
+                "measurement_datetime": [datetime.datetime(2024, 1, 1)],
+                "measurement_concept_id": [1001],
+                # No measurement_source_concept_id column
+            }
+        )
+
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id",
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            relationship_map_df=relationship_map_df,
+            standard_only=True,
+        )
+
+        # concept_id 1001 is non-standard, no companion column for relationship → dropped
+        assert len(result) == 0
+
+    def test_auto_detect_standard_only_false(self, concept_df, relationship_map_df, meds_schema):
+        """With standard_only=False, auto-detected companion still enables relationship
+        resolution as a fallback for concept_ids not in concept table."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1, 2],
+                "measurement_datetime": [
+                    datetime.datetime(2024, 1, 1),
+                    datetime.datetime(2024, 1, 2),
+                ],
+                # Row 1: concept_id 1001 exists in concept table (non-standard but allowed)
+                # Row 2: concept_id 0 not in concept table → relationship fallback
+                "measurement_concept_id": [1001, 0],
+                "measurement_source_concept_id": pl.Series([1001, 5001], dtype=pl.Int64),
+            }
+        )
+
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id",
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            relationship_map_df=relationship_map_df,
+            standard_only=False,
+        )
+
+        codes = result["code"].to_list()
+        assert len(result) == 2
+        # Row 1: concept_id 1001 → STANFORD_MEAS/GLUCOSE (non-standard allowed)
+        assert codes[0] == "STANFORD_MEAS/GLUCOSE"
+        # Row 2: concept_id 0 → null, relationship resolves source 5001 → SNOMED/399208008
+        assert codes[1] == "SNOMED/399208008"
+
     def test_standard_only_filters_non_standard_concepts(self, concept_df, meds_schema):
         """With standard_only=True, non-standard concepts produce null codes."""
         df = pl.DataFrame(

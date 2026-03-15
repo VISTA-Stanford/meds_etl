@@ -271,7 +271,6 @@
             "numeric_value": "@value_as_number",
             "text_value": "@value_as_string",
             "filter": [
-                "@observation_concept_id != 2000006253",
                 "@value_as_number IS NOT NULL OR @value_as_string IS NOT NULL"
             ],
             "properties": [
