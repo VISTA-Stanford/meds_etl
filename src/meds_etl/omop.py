@@ -35,9 +35,11 @@ import meds_etl.unsorted
 from meds_etl.omop_common import (  # noqa: F401
     apply_transforms,
     build_concept_map,
+    build_relationship_resolution_map,
     build_template_expression,
     collect_stage1_tasks,
     config_requires_concept_lookup,
+    config_requires_relationship_mapping,
     config_type_to_polars,
     describe_code_mapping,
     find_concept_id_columns_for_prescan,
@@ -338,7 +340,19 @@ def run_omop_to_meds_etl(
     else:
         print("\n📋 Config does not require concept lookups - skipping concept map build")
 
+    # Build relationship resolution map if any table uses concept_relationship mapping
+    relationship_map_df: Optional[pl.DataFrame] = None
+
+    if config_requires_relationship_mapping(config) and concept_df is not None and len(concept_df) > 0:
+        print("\n  Building concept_relationship resolution map...")
+        relationship_map_df = build_relationship_resolution_map(omop_dir, concept_df, verbose=verbose)
+        if relationship_map_df is not None:
+            print(f"  ✅ {len(relationship_map_df):,} source → standard concept mappings loaded")
+        else:
+            print("  ⚠️  No concept_relationship table found — falling back to direct concept lookups")
+
     concept_df_data = pickle.dumps(concept_df) if concept_df is not None else None
+    relationship_map_data = pickle.dumps(relationship_map_df) if relationship_map_df is not None else None
 
     dataset_metadata = {
         "dataset_name": "OMOP",
@@ -382,6 +396,7 @@ def run_omop_to_meds_etl(
         meds_schema=meds_schema,
         concept_df_data=concept_df_data,
         compression="zstd",
+        relationship_map_data=relationship_map_data,
     )
 
     print(f"\nProcessing {len(tasks)} files with {num_workers} workers...")

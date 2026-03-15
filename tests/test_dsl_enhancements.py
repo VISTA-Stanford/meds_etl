@@ -579,3 +579,300 @@ class TestVocabularyProvider:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ============================================================================
+# RELATIONSHIP RESOLUTION (resolve_source_concepts)
+# ============================================================================
+
+
+class TestRelationshipResolution:
+    """Test concept_relationship 'Maps to' resolution in transform pipeline."""
+
+    @pytest.fixture
+    def concept_df(self):
+        return pl.DataFrame(
+            {
+                "concept_id": [1001, 2001, 3001, 4001, 5001],
+                "code": [
+                    "STANFORD_MEAS/GLUCOSE",
+                    "SNOMED/166900001",
+                    "LOINC/2339-0",
+                    "CPT4/99213",
+                    "STANFORD_PROC/XR_CHEST",
+                ],
+                "concept_code": ["GLUCOSE", "166900001", "2339-0", "99213", "XR_CHEST"],
+                "concept_name": [
+                    "Glucose by Meter",
+                    "Glucometer blood glucose",
+                    "Glucose",
+                    "Office visit",
+                    "Chest X-Ray",
+                ],
+                "vocabulary_id": ["STANFORD_MEAS", "SNOMED", "LOINC", "CPT4", "STANFORD_PROC"],
+                "domain_id": ["Measurement", "Measurement", "Measurement", "Procedure", "Procedure"],
+                "concept_class_id": ["Lab Test", "Clinical Finding", "Lab Test", "CPT4", "Procedure"],
+                "standard_concept": [None, "S", "S", "S", None],
+            }
+        )
+
+    @pytest.fixture
+    def relationship_map_df(self):
+        """Source concept → resolved standard code via 'Maps to'."""
+        return pl.DataFrame(
+            {
+                "source_concept_id": pl.Series([1001, 5001], dtype=pl.Int64),
+                "resolved_code": ["SNOMED/166900001", "SNOMED/399208008"],
+            }
+        )
+
+    @pytest.fixture
+    def meds_schema(self):
+        return {
+            "subject_id": pl.Int64,
+            "time": pl.Datetime("us"),
+            "code": pl.Utf8,
+            "numeric_value": pl.Float32,
+            "text_value": pl.Utf8,
+            "end": pl.Datetime("us"),
+        }
+
+    def test_concept_id_takes_priority_over_source(self, concept_df, relationship_map_df, meds_schema):
+        """When concept_id resolves to a standard concept, it wins over source_concept_id."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1, 2],
+                "measurement_datetime": [
+                    datetime.datetime(2024, 1, 1),
+                    datetime.datetime(2024, 1, 2),
+                ],
+                "measurement_concept_id": [3001, 4001],
+                "measurement_source_concept_id": pl.Series([1001, None], dtype=pl.Int64),
+            }
+        )
+
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id",
+                    "source_concept_id_field": "measurement_source_concept_id",
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            relationship_map_df=relationship_map_df,
+        )
+
+        codes = result["code"].to_list()
+        # Row 1: concept_id 3001 → LOINC/2339-0 (standard concept wins)
+        assert codes[0] == "LOINC/2339-0"
+        # Row 2: concept_id 4001 → CPT4/99213, source is null
+        assert codes[1] == "CPT4/99213"
+
+    def test_relationship_fallback_when_concept_id_is_zero(self, concept_df, relationship_map_df, meds_schema):
+        """When concept_id is 0 (unmapped), relationship resolution wins over raw source code."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1],
+                "measurement_datetime": [datetime.datetime(2024, 1, 1)],
+                "measurement_concept_id": [0],
+                "measurement_source_concept_id": pl.Series([1001], dtype=pl.Int64),
+            }
+        )
+
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id",
+                    "source_concept_id_field": "measurement_source_concept_id",
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            relationship_map_df=relationship_map_df,
+        )
+
+        codes = result["code"].to_list()
+        # concept_id 0 → null, relationship resolves source 1001 → SNOMED/166900001
+        # (relationship-resolved standard code wins over raw source STANFORD_MEAS/GLUCOSE)
+        assert codes[0] == "SNOMED/166900001"
+
+    def test_relationship_fallback_when_source_is_only_option(self, concept_df, relationship_map_df, meds_schema):
+        """When only source_concept_id_field is configured (no concept_id_field),
+        concept table lookup happens on source_concept_id, with relationship as fallback."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1],
+                "measurement_datetime": [datetime.datetime(2024, 1, 1)],
+                "measurement_source_concept_id": pl.Series([1001], dtype=pl.Int64),
+            }
+        )
+
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "source_concept_id_field": "measurement_source_concept_id",
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            relationship_map_df=relationship_map_df,
+        )
+
+        codes = result["code"].to_list()
+        # source_concept_id 1001 → STANFORD_MEAS/GLUCOSE via concept table
+        # (concept table lookup succeeds, relationship fallback not needed)
+        assert codes[0] == "STANFORD_MEAS/GLUCOSE"
+
+    def test_no_relationship_map_concept_id_wins(self, concept_df, meds_schema):
+        """Without relationship map, concept_id takes priority over source_concept_id."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1],
+                "measurement_datetime": [datetime.datetime(2024, 1, 1)],
+                "measurement_concept_id": [3001],
+                "measurement_source_concept_id": [1001],
+            }
+        )
+
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id",
+                    "source_concept_id_field": "measurement_source_concept_id",
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            relationship_map_df=None,
+        )
+
+        codes = result["code"].to_list()
+        # concept_id 3001 → LOINC/2339-0 (standard concept wins over source)
+        assert codes[0] == "LOINC/2339-0"
+
+    def test_standard_anchor_never_falls_back_to_source_code(self, concept_df, meds_schema):
+        """When concept_id_field is the anchor and concept_id=0, raw source code is NOT used."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1],
+                "measurement_datetime": [datetime.datetime(2024, 1, 1)],
+                "measurement_concept_id": [0],
+                "measurement_source_concept_id": [1001],
+            }
+        )
+
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id",
+                    "source_concept_id_field": "measurement_source_concept_id",
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            relationship_map_df=None,
+        )
+
+        # concept_id 0 → null, no relationship map, raw source code NOT allowed
+        # → row filtered out (null code)
+        assert len(result) == 0
+
+    def test_source_anchor_allows_source_code(self, concept_df, meds_schema):
+        """When source_concept_id_field is the anchor, source codes are acceptable."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1],
+                "measurement_datetime": [datetime.datetime(2024, 1, 1)],
+                "measurement_source_concept_id": [1001],
+            }
+        )
+
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "source_concept_id_field": "measurement_source_concept_id",
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            relationship_map_df=None,
+        )
+
+        codes = result["code"].to_list()
+        # source anchor → source code STANFORD_MEAS/GLUCOSE is acceptable
+        assert codes[0] == "STANFORD_MEAS/GLUCOSE"
+
+    def test_config_schema_validates_omop_concept_tables(self):
+        """The schema validator accepts valid vocabulary config."""
+        config = {
+            "vocabulary": {
+                "$omop": ["concept", "concept_relationship"],
+            },
+            "tables": {
+                "measurement": {
+                    "time_start": "@measurement_datetime",
+                    "code": "$omop:@measurement_concept_id",
+                }
+            },
+        }
+        errors = validate_config_schema(config)
+        assert not any("vocabulary" in e for e in errors)
+
+    def test_config_schema_rejects_invalid_omop_concept_tables(self):
+        """The schema validator rejects invalid entries in vocabulary.$omop."""
+        config = {
+            "vocabulary": {
+                "$omop": ["concept", "foobar"],
+            },
+            "tables": {
+                "measurement": {
+                    "time_start": "@measurement_datetime",
+                    "code": "$omop:@measurement_concept_id",
+                }
+            },
+        }
+        errors = validate_config_schema(config)
+        assert any("foobar" in e for e in errors)

@@ -350,6 +350,13 @@ def config_requires_concept_lookup(config: Dict[str, Any]) -> bool:
     return False
 
 
+def config_requires_relationship_mapping(config: Dict[str, Any]) -> bool:
+    """Check whether the config uses concept_relationship for $omop: resolution."""
+    vocab = config.get("vocabulary", {})
+    omop_sources = vocab.get("$omop", [])
+    return "concept_relationship" in omop_sources
+
+
 def describe_code_mapping(
     table_config: Dict[str, Any],
     is_canonical: bool,
@@ -412,6 +419,7 @@ def build_concept_map(omop_dir: Path, verbose: bool = False) -> Tuple[pl.DataFra
                     "vocabulary_id": pl.Utf8,
                     "domain_id": pl.Utf8,
                     "concept_class_id": pl.Utf8,
+                    "standard_concept": pl.Utf8,
                 }
             ),
             {},
@@ -429,6 +437,7 @@ def build_concept_map(omop_dir: Path, verbose: bool = False) -> Tuple[pl.DataFra
             vocabulary_id=pl.col("vocabulary_id"),
             domain_id=pl.col("domain_id"),
             concept_class_id=pl.col("concept_class_id"),
+            **({"standard_concept": pl.col("standard_concept")} if "standard_concept" in df.columns else {}),
         )
 
         concept_dfs.append(concept_df)
@@ -484,6 +493,96 @@ def build_concept_map(omop_dir: Path, verbose: bool = False) -> Tuple[pl.DataFra
         print(f"  Custom concepts: {len(code_metadata):,}")
 
     return concept_df_combined, code_metadata
+
+
+def build_relationship_resolution_map(
+    omop_dir: Path,
+    concept_df: pl.DataFrame,
+    verbose: bool = False,
+) -> Optional[pl.DataFrame]:
+    """Build a source_concept_id → resolved_code map from concept_relationship "Maps to" chains.
+
+    Only resolves custom/site-specific concepts (concept_id >= 2,000,000,000) — standard
+    OMOP concepts are already handled by the concept table directly. Loads the
+    concept_relationship table, filters to ``relationship_id = "Maps to"`` with custom
+    source concepts, joins the target concept_id against the concept table to get the
+    resolved code, and keeps only rows where the target is a standard concept
+    (``standard_concept = 'S'``).
+
+    For source concepts that map to multiple standard targets, the first is kept
+    (deterministic via sort on target concept_id).
+
+    Returns:
+        DataFrame with columns [source_concept_id: Int64, resolved_code: Utf8],
+        or None if no concept_relationship files are found.
+    """
+    rel_dir = omop_dir / "concept_relationship"
+    rel_files: List[Path] = []
+    if rel_dir.is_dir():
+        rel_files = list(rel_dir.glob("*.parquet"))
+    elif (omop_dir / "concept_relationship.parquet").exists():
+        rel_files = [omop_dir / "concept_relationship.parquet"]
+
+    if not rel_files:
+        if verbose:
+            print("  ⚠️  No concept_relationship files found — skipping relationship resolution")
+        return None
+
+    if verbose:
+        print(f"\n  Building relationship resolution map from {len(rel_files)} file(s)...")
+
+    rel_dfs = []
+    for rel_file in tqdm(rel_files, desc="Loading concept_relationship", disable=not verbose):
+        df = pl.read_parquet(rel_file)
+        df = df.rename({col: col.lower() for col in df.columns})
+
+        maps_to = df.filter(
+            (pl.col("relationship_id") == "Maps to")
+            & (pl.col("concept_id_1") != pl.col("concept_id_2"))
+            & (pl.col("concept_id_1") >= 2_000_000_000)
+            & (pl.col("concept_id_2") > 0)
+        ).select(
+            source_concept_id=pl.col("concept_id_1").cast(pl.Int64),
+            target_concept_id=pl.col("concept_id_2").cast(pl.Int64),
+        )
+        rel_dfs.append(maps_to)
+
+    if not rel_dfs:
+        return None
+
+    all_rels = pl.concat(rel_dfs, rechunk=True)
+
+    # Join target concept_id against the concept table to get code + standard_concept flag
+    has_standard = "standard_concept" in concept_df.columns
+    if has_standard:
+        target_info = concept_df.select(
+            pl.col("concept_id").alias("target_concept_id"),
+            pl.col("code").alias("resolved_code"),
+            pl.col("standard_concept"),
+        )
+    else:
+        target_info = concept_df.select(
+            pl.col("concept_id").alias("target_concept_id"),
+            pl.col("code").alias("resolved_code"),
+        )
+
+    resolved = all_rels.join(target_info, on="target_concept_id", how="inner")
+
+    if has_standard:
+        resolved = resolved.filter(pl.col("standard_concept") == "S").drop("standard_concept")
+
+    # Deduplicate: for source concepts with multiple standard targets, keep the first
+    resolved = (
+        resolved.sort("target_concept_id")
+        .group_by("source_concept_id")
+        .first()
+        .select("source_concept_id", "resolved_code")
+    )
+
+    if verbose:
+        print(f"  ✅ Built resolution map: {len(resolved):,} source → standard mappings")
+
+    return resolved
 
 
 def find_concept_id_columns_for_prescan(table_name: str, config: Dict) -> List[str]:
@@ -834,6 +933,7 @@ def transform_to_meds_unsorted(
     meds_schema: Dict[str, type],
     concept_df: Optional[pl.DataFrame] = None,
     fixed_code: Optional[str] = None,
+    relationship_map_df: Optional[pl.DataFrame] = None,
 ) -> pl.DataFrame:
     """
     Transform OMOP DataFrame to MEDS Unsorted format.
@@ -841,6 +941,11 @@ def transform_to_meds_unsorted(
     Fast transformation using vectorized operations, no sorting.
     Uses DataFrame joins for concept mapping.
     Produces output compatible with meds_etl_cpp or unsorted.sort().
+
+    Args:
+        relationship_map_df: Optional DataFrame with [source_concept_id, resolved_code]
+            from concept_relationship "Maps to" chains. When provided, source concept IDs
+            are resolved through this map before falling back to the regular concept lookup.
     """
     # 0. Apply row-level filter (if configured)
     compiled_filter = table_config.get("_compiled_filter")
@@ -953,23 +1058,43 @@ def transform_to_meds_unsorted(
                 needs_concept_join = True
                 concept_join_alias = "code_concept_lookup"
                 concept_join_field = concept_config.get("concept_field", "code")
+
+                # When both source_concept_id and concept_id are present, keep them
+                # as separate columns so each gets its own concept table join.
+                # This avoids losing the standard concept_id when the custom
+                # source_concept_id coalesces over it.
+                if source_concept_id_field and concept_id_field:
+                    base_exprs.append(pl.col(source_concept_id_field).cast(pl.Int64).alias("_source_concept_id"))
+                    base_exprs.append(pl.col(concept_id_field).cast(pl.Int64).alias("concept_id"))
+                    if fallback_concept_id is not None:
+                        base_exprs.append(pl.lit(fallback_concept_id).cast(pl.Int64).alias("_fallback_concept_id"))
+                elif source_concept_id_field:
+                    exprs_to_coalesce = [pl.col(source_concept_id_field).cast(pl.Int64)]
+                    if fallback_concept_id is not None:
+                        exprs_to_coalesce.append(pl.lit(fallback_concept_id).cast(pl.Int64))
+                    if len(exprs_to_coalesce) > 1:
+                        base_exprs.append(pl.coalesce(exprs_to_coalesce).alias("concept_id"))
+                    else:
+                        base_exprs.append(exprs_to_coalesce[0].alias("concept_id"))
+                elif concept_id_field:
+                    exprs_to_coalesce = [pl.col(concept_id_field).cast(pl.Int64)]
+                    if fallback_concept_id is not None:
+                        exprs_to_coalesce.append(pl.lit(fallback_concept_id).cast(pl.Int64))
+                    if len(exprs_to_coalesce) > 1:
+                        base_exprs.append(pl.coalesce(exprs_to_coalesce).alias("concept_id"))
+                    else:
+                        base_exprs.append(exprs_to_coalesce[0].alias("concept_id"))
+                else:
+                    base_exprs.append(pl.lit(fallback_concept_id).cast(pl.Int64).alias("concept_id"))
+
                 code_candidates.append(concept_join_alias)
 
-                exprs_to_coalesce: List[pl.Expr] = []
-                if source_concept_id_field:
-                    exprs_to_coalesce.append(pl.col(source_concept_id_field).cast(pl.Int64))
-                if concept_id_field:
-                    exprs_to_coalesce.append(pl.col(concept_id_field).cast(pl.Int64))
-                if fallback_concept_id is not None:
-                    exprs_to_coalesce.append(pl.lit(fallback_concept_id).cast(pl.Int64))
-
-                if not exprs_to_coalesce:
-                    raise ValueError("concept_id mapping requires at least one source for concept ids")
-
-                if len(exprs_to_coalesce) > 1:
-                    base_exprs.append(pl.coalesce(exprs_to_coalesce).alias("concept_id"))
-                else:
-                    base_exprs.append(exprs_to_coalesce[0].alias("concept_id"))
+                # Track source_concept_id separately for relationship resolution
+                if relationship_map_df is not None and source_concept_id_field:
+                    if not (source_concept_id_field and concept_id_field):
+                        base_exprs.append(
+                            pl.col(source_concept_id_field).cast(pl.Int64).alias("_source_concept_id_for_resolution")
+                        )
 
         if "source_value" in code_mappings:
             source_value_config = code_mappings["source_value"]
@@ -1082,6 +1207,8 @@ def transform_to_meds_unsorted(
     result = df.select(base_exprs)
 
     # Perform concept join for code (only select needed columns to avoid leaking extras)
+    _deferred_source_alias = None
+    _deferred_fallback_alias = None
     if needs_concept_join:
         join_alias = concept_join_alias or "code"
         if concept_join_field not in concept_df.columns:
@@ -1089,13 +1216,96 @@ def transform_to_meds_unsorted(
                 f"Concept field '{concept_join_field}' not found in concept DataFrame. "
                 f"Available columns: {concept_df.columns}."
             )
-        join_df = concept_df.select(
-            [
+
+        if "_source_concept_id" in result.columns and "concept_id" in result.columns:
+            # Separate joins: concept_id and source_concept_id each get their own lookup.
+            # They become separate code candidates so relationship resolution can
+            # be inserted between them in priority order.
+            primary_join_alias = f"{join_alias}_primary"
+            source_join_alias = f"{join_alias}_source"
+
+            primary_join_df = concept_df.select(
                 pl.col("concept_id"),
-                pl.col(concept_join_field).alias(join_alias),
-            ]
+                pl.col(concept_join_field).alias(primary_join_alias),
+            )
+            result = result.join(primary_join_df, on="concept_id", how="left")
+
+            source_join_df = concept_df.select(
+                pl.col("concept_id").alias("_src_join_id"),
+                pl.col(concept_join_field).alias(source_join_alias),
+            )
+            result = result.join(
+                source_join_df,
+                left_on="_source_concept_id",
+                right_on="_src_join_id",
+                how="left",
+            )
+
+            if "_fallback_concept_id" in result.columns:
+                fb_join_alias = f"{join_alias}_fallback"
+                fb_join_df = concept_df.select(
+                    pl.col("concept_id").alias("_fb_join_id"),
+                    pl.col(concept_join_field).alias(fb_join_alias),
+                )
+                result = result.join(
+                    fb_join_df,
+                    left_on="_fallback_concept_id",
+                    right_on="_fb_join_id",
+                    how="left",
+                )
+                _deferred_fallback_alias = fb_join_alias
+
+            # Rename _source_concept_id for relationship resolution
+            result = result.rename({"_source_concept_id": "_source_concept_id_for_resolution"})
+
+            # Replace the single code_concept_lookup candidate with ordered candidates:
+            # Priority: 1) primary (concept_id), 2) relationship (inserted later)
+            # Raw source concept code is NOT added — the anchor is a standard
+            # concept_id, so we never fall back to non-standard source codes.
+            code_candidates.remove(join_alias)
+            code_candidates.append(primary_join_alias)
+
+            drop_cols = ["concept_id"]
+            if "_fallback_concept_id" in result.columns:
+                drop_cols.append("_fallback_concept_id")
+            result = result.drop([c for c in drop_cols if c in result.columns])
+        else:
+            join_df = concept_df.select(
+                [
+                    pl.col("concept_id"),
+                    pl.col(concept_join_field).alias(join_alias),
+                ]
+            )
+            result = result.join(join_df, on="concept_id", how="left").drop("concept_id")
+
+    # Perform relationship resolution (source_concept_id → "Maps to" → standard code)
+    if relationship_map_df is not None and "_source_concept_id_for_resolution" in result.columns:
+        rel_alias = "code_relationship_resolved"
+        result = result.join(
+            relationship_map_df,
+            left_on="_source_concept_id_for_resolution",
+            right_on="source_concept_id",
+            how="left",
         )
-        result = result.join(join_df, on="concept_id", how="left").drop("concept_id")
+        if "resolved_code" in result.columns:
+            result = result.rename({"resolved_code": rel_alias})
+        result = result.drop("_source_concept_id_for_resolution")
+        if "source_concept_id" in result.columns:
+            result = result.drop("source_concept_id")
+        # Append as fallback — relationship resolution only kicks in when the
+        # concept table lookup didn't produce a code (e.g., concept_id was 0
+        # and source_concept_id is a custom concept with a "Maps to" chain)
+        if rel_alias in result.columns:
+            code_candidates.append(rel_alias)
+
+    # Add deferred source and fallback concept codes as lowest-priority fallbacks.
+    # Only used when the anchor column is a source concept (i.e., source_concept_id_field
+    # is the only field configured). When the anchor is a standard concept_id_field,
+    # we NEVER fall back to raw source codes — only standard resolutions are acceptable.
+    if _deferred_source_alias is not None and _deferred_source_alias in result.columns:
+        code_candidates.append(_deferred_source_alias)
+    if _deferred_fallback_alias is not None and _deferred_fallback_alias in result.columns:
+        code_candidates.append(_deferred_fallback_alias)
 
     # Perform concept lookups for properties and text_value/numeric_value
     all_concept_requests = concept_value_requests + concept_property_requests
@@ -1164,10 +1374,26 @@ def process_omop_file_worker(args: Tuple) -> Dict:
     Worker function to process a single OMOP file.
 
     Reads OMOP Parquet → transforms to MEDS Unsorted → writes output.
-    Accepts a 10-element tuple: the original 9 elements plus compression.
-    Falls back to "zstd" if only 9 elements are provided (backwards compat).
+    Accepts a tuple of 10 or 11 elements (11th is relationship_map_data).
+    Falls back to "zstd" compression and no relationship map for shorter tuples.
     """
-    if len(args) == 10:
+    relationship_map_data = None
+
+    if len(args) == 11:
+        (
+            file_path,
+            table_name,
+            table_config,
+            primary_key,
+            output_dir,
+            meds_schema,
+            concept_df_data,
+            is_canonical,
+            fixed_code,
+            compression,
+            relationship_map_data,
+        ) = args
+    elif len(args) == 10:
         (
             file_path,
             table_name,
@@ -1196,6 +1422,7 @@ def process_omop_file_worker(args: Tuple) -> Dict:
 
     concept_df = pickle.loads(concept_df_data) if concept_df_data else None
     concept_df_size = len(concept_df) if concept_df is not None else 0
+    relationship_map_df = pickle.loads(relationship_map_data) if relationship_map_data else None
 
     try:
         df = pl.read_parquet(file_path)
@@ -1221,6 +1448,7 @@ def process_omop_file_worker(args: Tuple) -> Dict:
             meds_schema=meds_schema,
             concept_df=concept_df,
             fixed_code=fixed_code,
+            relationship_map_df=relationship_map_df,
         )
 
         output_rows = len(meds_df)
@@ -1273,6 +1501,7 @@ def collect_stage1_tasks(
     meds_schema: Dict[str, type],
     concept_df_data: Optional[bytes],
     compression: str = "zstd",
+    relationship_map_data: Optional[bytes] = None,
 ) -> List[Tuple]:
     """
     Collect all Stage 1 processing tasks from config.
@@ -1309,6 +1538,7 @@ def collect_stage1_tasks(
                     is_canonical,
                     fixed_code,
                     compression,
+                    relationship_map_data,
                 )
             )
 
@@ -1328,6 +1558,7 @@ def collect_stage1_tasks(
                     False,
                     None,
                     compression,
+                    relationship_map_data,
                 )
             )
 

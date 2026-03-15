@@ -31,6 +31,7 @@ This directory contains example JSON configs for converting OMOP CDM data to MED
 | `primary_key` | No | Patient identifier column (default: `person_id`) |
 | `canonical_events` | No | Demographic/lifecycle events (birth, death, gender, race, ethnicity) |
 | `tables` | Yes | Map of OMOP table names to event extraction configs |
+| `vocabulary` | No | Configures `$prefix:` operators; e.g., `{"$omop": ["concept", "concept_relationship"]}` |
 
 ### Table Config Keys
 
@@ -149,3 +150,38 @@ Supported filter operators: `!=`, `==`, `>`, `<`, `>=`, `<=`, `IS NULL`, `IS NOT
 - **Raw/source codes** (`omop_etl_vista_raw_codes.json`): Uses `*_source_concept_id` columns with `$omop:` to preserve the original source system codes (ICD-10, CPT, etc.). Useful when you need source-level granularity.
 
 - **OMOP concept IDs** (`omop_etl_vista_omop_concepts.json`): Passes through raw integer concept IDs without vocabulary lookup. Fastest processing, but codes are opaque integer identifiers.
+
+## Resolving Source Concepts via concept_relationship
+
+Some OMOP datasets (e.g., Stanford) include site-specific custom concepts (concept_id > 2 billion) with vocabularies like `STANFORD_MEAS`, `STANFORD_PROC`, etc. These custom concepts have "Maps to" relationships in the OMOP `concept_relationship` table that resolve to standard concepts (SNOMED, CVX, RxNorm Extension, etc.).
+
+By default, the `$omop:` operator only uses the `concept` table for lookups. To also resolve custom source concepts through `concept_relationship`, configure the `vocabulary` key:
+
+```json
+{
+    "vocabulary": {
+        "$omop": ["concept", "concept_relationship"]
+    },
+    "tables": {
+        "measurement": {
+            "time_start": "@measurement_datetime",
+            "code": "$omop:@measurement_concept_id",
+            "numeric_value": "@value_as_number"
+        }
+    }
+}
+```
+
+When `"concept_relationship"` is included, the ETL will:
+
+1. Load the `concept_relationship` table and filter to `relationship_id = "Maps to"` where the source concept is a custom/site-specific concept (concept_id >= 2,000,000,000)
+2. For any `$omop:` lookup with a `*_source_concept_id` that is a custom concept, look up the source concept in the relationship table
+3. If a standard target concept exists (where `standard_concept = 'S'`), use the resolved target's code
+4. Otherwise, fall back to the regular `concept` table lookup
+
+This is strictly additive — standard OMOP concepts (concept_id < 2B) are always resolved directly through the `concept` table and are never affected by concept_relationship. The relationship resolution only kicks in for custom/site-specific concepts that would otherwise resolve to non-standard vocabulary codes (e.g., `STANFORD_MEAS/GLUCOSE` instead of `SNOMED/166900001`).
+
+| `vocabulary.$omop` value | Behavior |
+|--------------------------|----------|
+| `["concept"]` (default when `vocabulary` is omitted) | Direct concept table lookup only |
+| `["concept", "concept_relationship"]` | Also walk "Maps to" chains for custom source concepts (concept_id >= 2B) |

@@ -7,12 +7,7 @@
 
 <div align="center">
 
-  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-%3E3.10-blue" alt="Python > 3.10"></a>
-  <a href="https://github.com/VISTA-Stanford/meds_etl/actions/workflows/python-test.yml"><img src="https://github.com/VISTA-Stanford/meds_etl/actions/workflows/python-test.yml/badge.svg?branch=main" alt="Tests"></a>
-  <img src="https://img.shields.io/badge/MEDS-0.3.3-blue" alt="MEDS 0.3.3">
-  <a href="https://github.com/VISTA-Stanford/meds_etl/graphs/commit-activity"><img src="https://img.shields.io/badge/Maintained%3F-yes-green.svg" alt="Maintained"></a>
-  <a href="https://github.com/psf/black"><img src="https://img.shields.io/badge/code%20style-black-000000.svg" alt="Code style: black"></a>
-  <a href="https://github.com/VISTA-Stanford/meds_etl/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
+<a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-%3E3.10-blue" alt="Python > 3.10"></a><a href="https://github.com/VISTA-Stanford/meds_etl/actions/workflows/python-test.yml"><img src="https://github.com/VISTA-Stanford/meds_etl/actions/workflows/python-test.yml/badge.svg?branch=main" alt="Tests"></a><img src="https://img.shields.io/badge/MEDS-0.3.3-blue" alt="MEDS 0.3.3"><a href="https://github.com/VISTA-Stanford/meds_etl/graphs/commit-activity"><img src="https://img.shields.io/badge/Maintained%3F-yes-green.svg" alt="Maintained"></a><a href="https://github.com/psf/black"><img src="https://img.shields.io/badge/code%20style-black-000000.svg" alt="Code style: black"></a><a href="https://github.com/VISTA-Stanford/meds_etl/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
 
 </div>
 
@@ -108,6 +103,7 @@ The JSON config file tells the ETL **which OMOP tables to process** and **how to
 | `@col1 \|\| @col2` | Fallback (first non-null) | `@measurement_datetime \|\| @measurement_date` |
 | `{@col >> transform()}` | Transform pipe | `{@note_title >> regex_replace('\\s+', '-')}` |
 | `filter` | Row-level filtering | `"@concept_id != 0"` |
+| `omop_concept_tables` | Custom concept resolution (top-level) | `"vocabulary": {"$omop": ["concept", "concept_relationship"]}` |
 
 - **`$omop:` prefix** triggers a join with the OMOP `concept` table, producing codes in `vocabulary_id/concept_code` format.
 - **`$literal:`** must be used for literal string values in properties. Bare strings (without `@` or `$literal:`) are treated as errors.
@@ -124,6 +120,18 @@ Configs are automatically validated at load time. The validator checks:
 - Invalid property types
 - DSL syntax errors (unbalanced braces, unknown vocabulary prefixes)
 - Ambiguous bare string literals in properties (must use `$literal:`)
+
+### Source Concept Resolution
+
+For OMOP datasets with site-specific custom concepts (e.g., Stanford), configure the `vocabulary` key to have `$omop:` also walk "Maps to" chains for custom source concepts:
+
+```json
+"vocabulary": {
+    "$omop": ["concept", "concept_relationship"]
+}
+```
+
+See [`examples/README.md`](examples/README.md#resolving-source-concepts-via-concept_relationship) for details.
 
 ## Testing
 

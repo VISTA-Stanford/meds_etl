@@ -24,6 +24,7 @@ _TOP_LEVEL_KEYS = {
     "num_shards",
     "description",
     "version",
+    "vocabulary",
 }
 
 _EVENT_TABLE_KEYS = {
@@ -109,6 +110,31 @@ def validate_config_schema(config: Dict[str, Any]) -> List[str]:
     # Must have at least one of canonical_events or tables
     if "canonical_events" not in config and "tables" not in config:
         errors.append("Config must define at least 'canonical_events' or 'tables'")
+
+    # Validate vocabulary
+    _VALID_OMOP_SOURCES = {"concept", "concept_relationship"}
+    if "vocabulary" in config:
+        vocab = config["vocabulary"]
+        if not isinstance(vocab, dict):
+            errors.append('\'vocabulary\' must be a dict (e.g., {"$omop": ["concept"]})')
+        else:
+            for prefix, sources in vocab.items():
+                if prefix != "$omop":
+                    errors.append(
+                        f"'vocabulary' contains unknown prefix '{prefix}'; " f"currently only '$omop' is supported"
+                    )
+                    continue
+                if not isinstance(sources, list):
+                    errors.append(
+                        f"'vocabulary[\"{prefix}\"]' must be a list " f'(e.g., ["concept", "concept_relationship"])'
+                    )
+                else:
+                    for entry in sources:
+                        if entry not in _VALID_OMOP_SOURCES:
+                            errors.append(
+                                f"'vocabulary[\"{prefix}\"]' contains unknown source '{entry}'; "
+                                f"valid values: {sorted(_VALID_OMOP_SOURCES)}"
+                            )
 
     # Validate canonical events
     for event_name, event_config in config.get("canonical_events", {}).items():
