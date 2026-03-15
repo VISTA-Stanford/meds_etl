@@ -4,7 +4,7 @@
     "vocabulary": {
         "$omop": {
             "sources": ["concept", "concept_relationship"],
-            "standard_only": true
+            "standard_only": ["S", "C"]
         }
     },
     "canonical_events": {

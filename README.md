@@ -104,7 +104,7 @@ The JSON config file tells the ETL **which OMOP tables to process** and **how to
 | `{@col >> transform()}` | Transform pipe | `{@note_title >> regex_replace('\\s+', '-')}` |
 | `filter` | Row-level filtering | `"@concept_id != 0"` or `["pred1", "pred2"]` (ORed) |
 | `exempt_codes` | Bypass `standard_only` for specific codes | `["LOINC/LP21258-6"]` |
-| `vocabulary` | Concept resolution config (top-level) | `{"$omop": {"sources": [...], "standard_only": true}}` |
+| `vocabulary` | Concept resolution config (top-level) | `{"$omop": {"sources": [...], "standard_only": ["S", "C"]}}` |
 
 - **`$omop:` prefix** triggers a join with the OMOP `concept` table, producing codes in `vocabulary_id/concept_code` format.
 - **`$literal:`** must be used for literal string values in properties. Bare strings (without `@` or `$literal:`) are treated as errors.
@@ -130,14 +130,14 @@ For OMOP datasets with site-specific custom concepts (e.g., Stanford), configure
 "vocabulary": {
     "$omop": {
         "sources": ["concept", "concept_relationship"],
-        "standard_only": true
+        "standard_only": ["S", "C"]
     }
 }
 ```
 
-When `concept_relationship` is included, the ETL **auto-detects** the companion `*_source_concept_id` column for each `$omop:@*_concept_id` lookup (e.g., `observation_concept_id` → `observation_source_concept_id`). If the primary concept lookup fails (or is non-standard when `standard_only` is true), the companion source concept is walked through "Maps to" chains to find a standard code.
+When `concept_relationship` is included, the ETL **auto-detects** the companion `*_source_concept_id` column for each `$omop:@*_concept_id` lookup (e.g., `observation_concept_id` → `observation_source_concept_id`). If the primary concept lookup fails (or is non-standard when `standard_only` is set), the companion source concept is walked through "Maps to" chains to find a standard code.
 
-When `standard_only` is `true`, only standard OMOP concepts (`standard_concept = 'S'`) are emitted — non-standard concepts produce null codes and are filtered out.
+`standard_only` accepts `true` (shorthand for `["S"]`), a list like `["S", "C"]` to include Classification concepts, or `false`/omitted for no filtering. OMOP's `standard_concept` values are `"S"` (Standard), `"C"` (Classification), and null (non-standard).
 
 See [`examples/README.md`](examples/README.md#resolving-source-concepts-via-concept_relationship) for details.
 

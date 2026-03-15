@@ -654,26 +654,35 @@ class TestRelationshipResolution:
     def concept_df(self):
         return pl.DataFrame(
             {
-                "concept_id": [1001, 2001, 3001, 4001, 5001],
+                "concept_id": [1001, 2001, 3001, 4001, 5001, 6001],
                 "code": [
                     "STANFORD_MEAS/GLUCOSE",
                     "SNOMED/166900001",
                     "LOINC/2339-0",
                     "CPT4/99213",
                     "STANFORD_PROC/XR_CHEST",
+                    "LOINC/IO_OUT",
                 ],
-                "concept_code": ["GLUCOSE", "166900001", "2339-0", "99213", "XR_CHEST"],
+                "concept_code": ["GLUCOSE", "166900001", "2339-0", "99213", "XR_CHEST", "IO_OUT"],
                 "concept_name": [
                     "Glucose by Meter",
                     "Glucometer blood glucose",
                     "Glucose",
                     "Office visit",
                     "Chest X-Ray",
+                    "Output",
                 ],
-                "vocabulary_id": ["STANFORD_MEAS", "SNOMED", "LOINC", "CPT4", "STANFORD_PROC"],
-                "domain_id": ["Measurement", "Measurement", "Measurement", "Procedure", "Procedure"],
-                "concept_class_id": ["Lab Test", "Clinical Finding", "Lab Test", "CPT4", "Procedure"],
-                "standard_concept": [None, "S", "S", "S", None],
+                "vocabulary_id": ["STANFORD_MEAS", "SNOMED", "LOINC", "CPT4", "STANFORD_PROC", "LOINC"],
+                "domain_id": ["Measurement", "Measurement", "Measurement", "Procedure", "Procedure", "Measurement"],
+                "concept_class_id": [
+                    "Lab Test",
+                    "Clinical Finding",
+                    "Lab Test",
+                    "CPT4",
+                    "Procedure",
+                    "LOINC Hierarchy",
+                ],
+                "standard_concept": [None, "S", "S", "S", None, "C"],
             }
         )
 
@@ -934,7 +943,7 @@ class TestRelationshipResolution:
             "time_start": "measurement_datetime",
         }
 
-        # With standard_only=True: concept 1001 is non-standard → filtered out by
+        # With standard_only=["S"]: concept 1001 is non-standard → filtered out by
         # concept table join, but source 1001 → SNOMED/166900001 via relationship
         result = transform_to_meds_unsorted(
             df=df,
@@ -943,7 +952,7 @@ class TestRelationshipResolution:
             meds_schema=meds_schema,
             concept_df=concept_df,
             relationship_map_df=relationship_map_df,
-            standard_only=True,
+            standard_only=["S"],
         )
 
         codes = result["code"].to_list()
@@ -983,14 +992,14 @@ class TestRelationshipResolution:
             meds_schema=meds_schema,
             concept_df=concept_df,
             relationship_map_df=relationship_map_df,
-            standard_only=True,
+            standard_only=["S"],
         )
 
         # concept_id 1001 is non-standard, no companion column for relationship → dropped
         assert len(result) == 0
 
     def test_auto_detect_standard_only_false(self, concept_df, relationship_map_df, meds_schema):
-        """With standard_only=False, auto-detected companion still enables relationship
+        """With standard_only=None, auto-detected companion still enables relationship
         resolution as a fallback for concept_ids not in concept table."""
         df = pl.DataFrame(
             {
@@ -1022,7 +1031,7 @@ class TestRelationshipResolution:
             meds_schema=meds_schema,
             concept_df=concept_df,
             relationship_map_df=relationship_map_df,
-            standard_only=False,
+            standard_only=None,
         )
 
         codes = result["code"].to_list()
@@ -1033,7 +1042,7 @@ class TestRelationshipResolution:
         assert codes[1] == "SNOMED/399208008"
 
     def test_standard_only_filters_non_standard_concepts(self, concept_df, meds_schema):
-        """With standard_only=True, non-standard concepts produce null codes."""
+        """With standard_only=["S"], non-standard concepts produce null codes."""
         df = pl.DataFrame(
             {
                 "person_id": [1, 2],
@@ -1060,7 +1069,7 @@ class TestRelationshipResolution:
             primary_key="person_id",
             meds_schema=meds_schema,
             concept_df=concept_df,
-            standard_only=True,
+            standard_only=["S"],
         )
 
         codes = result["code"].to_list()
@@ -1070,7 +1079,7 @@ class TestRelationshipResolution:
         assert codes[0] == "LOINC/2339-0"
 
     def test_standard_only_false_keeps_non_standard(self, concept_df, meds_schema):
-        """With standard_only=False (default), non-standard concepts are kept."""
+        """With standard_only=None (default), non-standard concepts are kept."""
         df = pl.DataFrame(
             {
                 "person_id": [1, 2],
@@ -1097,7 +1106,7 @@ class TestRelationshipResolution:
             primary_key="person_id",
             meds_schema=meds_schema,
             concept_df=concept_df,
-            standard_only=False,
+            standard_only=None,
         )
 
         assert len(result) == 2
@@ -1309,7 +1318,7 @@ class TestRelationshipResolution:
             primary_key="person_id",
             meds_schema=meds_schema,
             concept_df=concept_df,
-            standard_only=True,
+            standard_only=["S"],
         )
 
         codes = result["code"].to_list()
@@ -1346,7 +1355,7 @@ class TestRelationshipResolution:
             primary_key="person_id",
             meds_schema=meds_schema,
             concept_df=concept_df,
-            standard_only=False,
+            standard_only=None,
         )
 
         codes = result["code"].to_list()
@@ -1386,7 +1395,7 @@ class TestRelationshipResolution:
             meds_schema=meds_schema,
             concept_df=concept_df,
             relationship_map_df=relationship_map_df,
-            standard_only=True,
+            standard_only=["S"],
         )
 
         codes = result["code"].to_list()
@@ -1422,3 +1431,94 @@ class TestRelationshipResolution:
         }
         errors = validate_config_schema(config)
         assert any("exempt_codes" in e for e in errors)
+
+    def test_standard_only_list_includes_classification(self, concept_df, meds_schema):
+        """standard_only=["S", "C"] includes both Standard and Classification concepts."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1, 2, 3],
+                "measurement_datetime": [
+                    datetime.datetime(2024, 1, 1),
+                    datetime.datetime(2024, 1, 2),
+                    datetime.datetime(2024, 1, 3),
+                ],
+                # 3001: LOINC/2339-0 (S) → kept
+                # 6001: LOINC/IO_OUT (C) → kept with ["S", "C"]
+                # 1001: STANFORD_MEAS/GLUCOSE (None) → dropped
+                "measurement_concept_id": [3001, 6001, 1001],
+            }
+        )
+
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id",
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            standard_only=["S", "C"],
+        )
+
+        codes = result["code"].to_list()
+        assert len(result) == 2
+        assert codes[0] == "LOINC/2339-0"
+        assert codes[1] == "LOINC/IO_OUT"
+
+    def test_standard_only_s_drops_classification(self, concept_df, meds_schema):
+        """standard_only=["S"] drops Classification concepts."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1, 2],
+                "measurement_datetime": [
+                    datetime.datetime(2024, 1, 1),
+                    datetime.datetime(2024, 1, 2),
+                ],
+                # 3001: LOINC/2339-0 (S) → kept
+                # 6001: LOINC/IO_OUT (C) → dropped
+                "measurement_concept_id": [3001, 6001],
+            }
+        )
+
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id",
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            standard_only=["S"],
+        )
+
+        codes = result["code"].to_list()
+        assert len(result) == 1
+        assert codes[0] == "LOINC/2339-0"
+
+    def test_config_schema_validates_standard_only_list(self):
+        """The schema validator accepts standard_only as a list of strings."""
+        config = {
+            "vocabulary": {"$omop": {"sources": ["concept"], "standard_only": ["S", "C"]}},
+            "tables": {
+                "measurement": {
+                    "time_start": "@measurement_datetime",
+                    "code": "$omop:@measurement_concept_id",
+                }
+            },
+        }
+        errors = validate_config_schema(config)
+        assert not any("standard_only" in e for e in errors)

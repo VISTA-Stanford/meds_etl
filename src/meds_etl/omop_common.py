@@ -366,9 +366,19 @@ def config_requires_relationship_mapping(config: Dict[str, Any]) -> bool:
     return "concept_relationship" in _get_omop_vocab_config(config).get("sources", [])
 
 
-def config_requires_standard_only(config: Dict[str, Any]) -> bool:
-    """Check whether the config restricts $omop: to standard concepts only."""
-    return _get_omop_vocab_config(config).get("standard_only", False) is True
+def config_requires_standard_only(config: Dict[str, Any]) -> List[str]:
+    """Return the list of allowed standard_concept values for $omop: filtering.
+
+    Returns an empty list if no filtering is requested.
+    Accepts ``standard_only: true`` (shorthand for ``["S"]``) or an explicit
+    list like ``["S", "C"]``.
+    """
+    val = _get_omop_vocab_config(config).get("standard_only", False)
+    if val is True:
+        return ["S"]
+    if isinstance(val, list):
+        return val
+    return []
 
 
 def describe_code_mapping(
@@ -979,7 +989,7 @@ def transform_to_meds_unsorted(
     concept_df: Optional[pl.DataFrame] = None,
     fixed_code: Optional[str] = None,
     relationship_map_df: Optional[pl.DataFrame] = None,
-    standard_only: bool = False,
+    standard_only: Optional[List[str]] = None,
 ) -> pl.DataFrame:
     """
     Transform OMOP DataFrame to MEDS Unsorted format.
@@ -992,8 +1002,9 @@ def transform_to_meds_unsorted(
         relationship_map_df: Optional DataFrame with [source_concept_id, resolved_code]
             from concept_relationship "Maps to" chains. When provided, source concept IDs
             are resolved through this map before falling back to the regular concept lookup.
-        standard_only: When True, the primary concept table join only matches standard
-            concepts (standard_concept = 'S'). Non-standard concepts produce null codes.
+        standard_only: List of allowed standard_concept values (e.g., ["S"] or ["S", "C"]).
+            When non-empty, the primary concept table join only matches concepts whose
+            standard_concept is in this list. Empty list or None means no filtering.
     """
     # 0. Apply row-level filter (if configured)
     compiled_filter = table_config.get("_compiled_filter")
@@ -1300,10 +1311,10 @@ def transform_to_meds_unsorted(
             primary_join_alias = f"{join_alias}_primary"
             source_join_alias = f"{join_alias}_source"
 
-            # When standard_only, filter primary join to standard concepts only
+            # When standard_only, filter primary join to allowed standard_concept values
             primary_concept_df = concept_df
             if standard_only and "standard_concept" in concept_df.columns:
-                primary_concept_df = concept_df.filter(pl.col("standard_concept") == "S")
+                primary_concept_df = concept_df.filter(pl.col("standard_concept").is_in(standard_only))
 
             primary_join_df = primary_concept_df.select(
                 pl.col("concept_id"),
@@ -1368,7 +1379,7 @@ def transform_to_meds_unsorted(
             # Single-column join path
             single_concept_df = concept_df
             if standard_only and _single_join_is_standard_anchor and "standard_concept" in concept_df.columns:
-                single_concept_df = concept_df.filter(pl.col("standard_concept") == "S")
+                single_concept_df = concept_df.filter(pl.col("standard_concept").is_in(standard_only))
 
             join_df = single_concept_df.select(
                 [
@@ -1510,10 +1521,10 @@ def process_omop_file_worker(args: Tuple) -> Dict:
 
     Reads OMOP Parquet → transforms to MEDS Unsorted → writes output.
     Accepts a tuple of 10, 11, or 12 elements.
-    Falls back to "zstd" compression, no relationship map, and standard_only=False for shorter tuples.
+    Falls back to "zstd" compression, no relationship map, and standard_only=None for shorter tuples.
     """
     relationship_map_data = None
-    standard_only = False
+    standard_only = None
 
     if len(args) == 12:
         (
@@ -1654,7 +1665,7 @@ def collect_stage1_tasks(
     concept_df_data: Optional[bytes],
     compression: str = "zstd",
     relationship_map_data: Optional[bytes] = None,
-    standard_only: bool = False,
+    standard_only: Optional[List[str]] = None,
 ) -> List[Tuple]:
     """
     Collect all Stage 1 processing tasks from config.

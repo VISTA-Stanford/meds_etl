@@ -31,7 +31,7 @@ This directory contains example JSON configs for converting OMOP CDM data to MED
 | `primary_key` | No | Patient identifier column (default: `person_id`) |
 | `canonical_events` | No | Demographic/lifecycle events (birth, death, gender, race, ethnicity) |
 | `tables` | Yes | Map of OMOP table names to event extraction configs |
-| `vocabulary` | No | Configures `$prefix:` operators; e.g., `{"$omop": {"sources": ["concept"], "standard_only": true}}` |
+| `vocabulary` | No | Configures `$prefix:` operators; e.g., `{"$omop": {"sources": ["concept"], "standard_only": ["S", "C"]}}` |
 
 ### Table Config Keys
 
@@ -164,7 +164,7 @@ Supported filter operators: `!=`, `==`, `>`, `<`, `>=`, `<=`, `IS NULL`, `IS NOT
 
 ### Exempt Codes
 
-When `standard_only: true` is set in the vocabulary config, non-standard concepts are dropped. Use `exempt_codes` on a table to allow specific non-standard codes through:
+When `standard_only` is set in the vocabulary config, concepts not matching the allowed values are dropped. Use `exempt_codes` on a table to allow specific non-matching codes through:
 
 ```json
 "observation": {
@@ -197,7 +197,7 @@ By default, the `$omop:` operator only uses the `concept` table for lookups. To 
     "vocabulary": {
         "$omop": {
             "sources": ["concept", "concept_relationship"],
-            "standard_only": true
+            "standard_only": ["S", "C"]
         }
     },
     "tables": {
@@ -215,13 +215,13 @@ The `vocabulary.$omop` config accepts either a shorthand list (`["concept"]`) or
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `sources` | list | `["concept"]` | OMOP tables used for resolution |
-| `standard_only` | bool | `false` | Only emit standard concepts (`standard_concept = 'S'`) |
+| `standard_only` | bool or list | `false` | Filter concepts by `standard_concept` value. `true` = `["S"]`, `["S", "C"]` = Standard + Classification |
 
 When `"concept_relationship"` is included, the ETL will:
 
 1. Load the `concept_relationship` table and filter to `relationship_id = "Maps to"` with non-self-referencing pairs (concept_id_1 ≠ concept_id_2)
 2. For any `$omop:@*_concept_id` lookup, **auto-detect** the companion `*_source_concept_id` column in the same table (e.g., `observation_concept_id` → `observation_source_concept_id`)
-3. Try the primary concept lookup first; if the concept is not found (or not standard when `standard_only` is true), walk the companion source concept ID through the "Maps to" chain
+3. Try the primary concept lookup first; if the concept is not found (or doesn't match `standard_only` values), walk the companion source concept ID through the "Maps to" chain
 4. If a standard target concept exists, use the resolved target's code; otherwise the row is dropped (null code)
 
 This auto-detection means you write `"code": "$omop:@observation_concept_id"` and the ETL automatically tries `observation_source_concept_id` for relationship resolution — no fallback syntax needed.
@@ -231,5 +231,6 @@ This is strictly additive — concepts that already resolve to standard codes th
 | `vocabulary.$omop` config | Behavior |
 |--------------------------|----------|
 | `["concept"]` (default when omitted) | Direct concept table lookup only, all concepts |
-| `{"sources": ["concept"], "standard_only": true}` | Direct lookup, standard concepts only |
-| `{"sources": ["concept", "concept_relationship"], "standard_only": true}` | Standard concepts + "Maps to" resolution for custom concepts |
+| `{"sources": ["concept"], "standard_only": true}` | Direct lookup, standard concepts (`S`) only |
+| `{"sources": ["concept"], "standard_only": ["S", "C"]}` | Direct lookup, standard + classification concepts |
+| `{"sources": ["concept", "concept_relationship"], "standard_only": ["S", "C"]}` | Standard + classification concepts + "Maps to" resolution |

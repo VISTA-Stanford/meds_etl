@@ -137,8 +137,14 @@ def validate_config_schema(config: Dict[str, Any]) -> List[str]:
                     if not isinstance(sources, list):
                         errors.append(f"'vocabulary[\"{prefix}\"].sources' must be a list")
                         sources = []
-                    if "standard_only" in value and not isinstance(value["standard_only"], bool):
-                        errors.append(f"'vocabulary[\"{prefix}\"].standard_only' must be a boolean")
+                    if "standard_only" in value:
+                        so = value["standard_only"]
+                        if not isinstance(so, bool) and not (
+                            isinstance(so, list) and all(isinstance(v, str) for v in so)
+                        ):
+                            errors.append(
+                                f"'vocabulary[\"{prefix}\"].standard_only' must be a boolean or list of strings"
+                            )
                 else:
                     errors.append(
                         f"'vocabulary[\"{prefix}\"]' must be a list or object "
