@@ -102,8 +102,8 @@ The JSON config file tells the ETL **which OMOP tables to process** and **how to
 | `$literal:value` | Explicit literal string | `$literal:measurement` |
 | `@col1 \|\| @col2` | Fallback (first non-null) | `@measurement_datetime \|\| @measurement_date` |
 | `{@col >> transform()}` | Transform pipe | `{@note_title >> regex_replace('\\s+', '-')}` |
-| `filter` | Row-level filtering | `"@concept_id != 0"` |
-| `omop_concept_tables` | Custom concept resolution (top-level) | `"vocabulary": {"$omop": ["concept", "concept_relationship"]}` |
+| `filter` | Row-level filtering | `"@concept_id != 0"` or `["pred1", "pred2"]` (ORed) |
+| `vocabulary` | Concept resolution config (top-level) | `{"$omop": {"sources": [...], "standard_only": true}}` |
 
 - **`$omop:` prefix** triggers a join with the OMOP `concept` table, producing codes in `vocabulary_id/concept_code` format.
 - **`$literal:`** must be used for literal string values in properties. Bare strings (without `@` or `$literal:`) are treated as errors.
@@ -127,9 +127,14 @@ For OMOP datasets with site-specific custom concepts (e.g., Stanford), configure
 
 ```json
 "vocabulary": {
-    "$omop": ["concept", "concept_relationship"]
+    "$omop": {
+        "sources": ["concept", "concept_relationship"],
+        "standard_only": true
+    }
 }
 ```
+
+When `standard_only` is `true`, only standard OMOP concepts (`standard_concept = 'S'`) are emitted — non-standard concepts produce null codes and are filtered out.
 
 See [`examples/README.md`](examples/README.md#resolving-source-concepts-via-concept_relationship) for details.
 

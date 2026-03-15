@@ -113,28 +113,43 @@ def validate_config_schema(config: Dict[str, Any]) -> List[str]:
 
     # Validate vocabulary
     _VALID_OMOP_SOURCES = {"concept", "concept_relationship"}
+    _VALID_OMOP_KEYS = {"sources", "standard_only"}
     if "vocabulary" in config:
         vocab = config["vocabulary"]
         if not isinstance(vocab, dict):
             errors.append('\'vocabulary\' must be a dict (e.g., {"$omop": ["concept"]})')
         else:
-            for prefix, sources in vocab.items():
+            for prefix, value in vocab.items():
                 if prefix != "$omop":
                     errors.append(
                         f"'vocabulary' contains unknown prefix '{prefix}'; " f"currently only '$omop' is supported"
                     )
                     continue
-                if not isinstance(sources, list):
-                    errors.append(
-                        f"'vocabulary[\"{prefix}\"]' must be a list " f'(e.g., ["concept", "concept_relationship"])'
-                    )
+                # Accept list shorthand or object form
+                if isinstance(value, list):
+                    sources = value
+                elif isinstance(value, dict):
+                    for k in value:
+                        if k not in _VALID_OMOP_KEYS:
+                            errors.append(f"'vocabulary[\"{prefix}\"]' contains unknown key '{k}'")
+                    sources = value.get("sources", [])
+                    if not isinstance(sources, list):
+                        errors.append(f"'vocabulary[\"{prefix}\"].sources' must be a list")
+                        sources = []
+                    if "standard_only" in value and not isinstance(value["standard_only"], bool):
+                        errors.append(f"'vocabulary[\"{prefix}\"].standard_only' must be a boolean")
                 else:
-                    for entry in sources:
-                        if entry not in _VALID_OMOP_SOURCES:
-                            errors.append(
-                                f"'vocabulary[\"{prefix}\"]' contains unknown source '{entry}'; "
-                                f"valid values: {sorted(_VALID_OMOP_SOURCES)}"
-                            )
+                    errors.append(
+                        f"'vocabulary[\"{prefix}\"]' must be a list or object "
+                        f'(e.g., ["concept"] or {{"sources": ["concept"], "standard_only": true}})'
+                    )
+                    continue
+                for entry in sources:
+                    if entry not in _VALID_OMOP_SOURCES:
+                        errors.append(
+                            f"'vocabulary[\"{prefix}\"]' contains unknown source '{entry}'; "
+                            f"valid values: {sorted(_VALID_OMOP_SOURCES)}"
+                        )
 
     # Validate canonical events
     for event_name, event_config in config.get("canonical_events", {}).items():
@@ -308,13 +323,15 @@ def _validate_filter(filter_val: Any, context: str) -> List[str]:
 
     elif isinstance(filter_val, list):
         for i, cond in enumerate(filter_val):
-            if not isinstance(cond, dict):
-                errors.append(f"{context} filter[{i}]: must be a dict")
-                continue
-            if "field" not in cond:
-                errors.append(f"{context} filter[{i}]: missing 'field'")
-            if "op" not in cond:
-                errors.append(f"{context} filter[{i}]: missing 'op'")
+            if isinstance(cond, str):
+                errors.extend(_validate_filter(cond, f"{context} filter[{i}]"))
+            elif isinstance(cond, dict):
+                if "field" not in cond:
+                    errors.append(f"{context} filter[{i}]: missing 'field'")
+                if "op" not in cond:
+                    errors.append(f"{context} filter[{i}]: missing 'op'")
+            else:
+                errors.append(f"{context} filter[{i}]: must be a string or dict")
 
     else:
         errors.append(f"{context} filter: must be a string or list, got {type(filter_val).__name__}")

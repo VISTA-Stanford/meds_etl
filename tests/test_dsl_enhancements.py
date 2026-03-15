@@ -199,43 +199,50 @@ class TestFilterCompilation:
     """Test filter expression compilation."""
 
     def test_compile_not_equal(self):
-        conditions = compile_filter_expression("@concept_id != 0")
-        assert len(conditions) == 1
-        assert conditions[0] == {"field": "concept_id", "op": "!=", "value": 0}
+        groups = compile_filter_expression("@concept_id != 0")
+        assert len(groups) == 1
+        assert groups[0] == [{"field": "concept_id", "op": "!=", "value": 0}]
 
     def test_compile_equal(self):
-        conditions = compile_filter_expression("@status == 'active'")
-        assert len(conditions) == 1
-        assert conditions[0] == {"field": "status", "op": "==", "value": "active"}
+        groups = compile_filter_expression("@status == 'active'")
+        assert len(groups) == 1
+        assert groups[0] == [{"field": "status", "op": "==", "value": "active"}]
 
     def test_compile_is_not_null(self):
-        conditions = compile_filter_expression("@value_as_number IS NOT NULL")
-        assert len(conditions) == 1
-        assert conditions[0] == {"field": "value_as_number", "op": "is_not_null"}
+        groups = compile_filter_expression("@value_as_number IS NOT NULL")
+        assert len(groups) == 1
+        assert groups[0] == [{"field": "value_as_number", "op": "is_not_null"}]
 
     def test_compile_is_null(self):
-        conditions = compile_filter_expression("@death_date IS NULL")
-        assert len(conditions) == 1
-        assert conditions[0] == {"field": "death_date", "op": "is_null"}
+        groups = compile_filter_expression("@death_date IS NULL")
+        assert len(groups) == 1
+        assert groups[0] == [{"field": "death_date", "op": "is_null"}]
 
     def test_compile_in(self):
-        conditions = compile_filter_expression("@domain_id IN ('Measurement', 'Observation')")
-        assert len(conditions) == 1
-        assert conditions[0]["field"] == "domain_id"
-        assert conditions[0]["op"] == "in"
-        assert conditions[0]["value"] == ["Measurement", "Observation"]
+        groups = compile_filter_expression("@domain_id IN ('Measurement', 'Observation')")
+        assert len(groups) == 1
+        assert groups[0][0]["field"] == "domain_id"
+        assert groups[0][0]["op"] == "in"
+        assert groups[0][0]["value"] == ["Measurement", "Observation"]
 
     def test_compile_comparison_operators(self):
         for op in [">", "<", ">=", "<="]:
-            conditions = compile_filter_expression(f"@value {op} 5")
-            assert conditions[0]["op"] == op
-            assert conditions[0]["value"] == 5
+            groups = compile_filter_expression(f"@value {op} 5")
+            assert groups[0][0]["op"] == op
+            assert groups[0][0]["value"] == 5
 
     def test_compile_and_conditions(self):
-        conditions = compile_filter_expression("@concept_id != 0 AND @value_as_number IS NOT NULL")
-        assert len(conditions) == 2
-        assert conditions[0]["field"] == "concept_id"
-        assert conditions[1]["field"] == "value_as_number"
+        groups = compile_filter_expression("@concept_id != 0 AND @value_as_number IS NOT NULL")
+        assert len(groups) == 1
+        assert len(groups[0]) == 2
+        assert groups[0][0]["field"] == "concept_id"
+        assert groups[0][1]["field"] == "value_as_number"
+
+    def test_compile_or_conditions(self):
+        groups = compile_filter_expression("@value_as_number IS NOT NULL OR @value_as_string IS NOT NULL")
+        assert len(groups) == 2
+        assert groups[0][0]["field"] == "value_as_number"
+        assert groups[1][0]["field"] == "value_as_string"
 
     def test_compile_filter_in_config(self):
         config = {
@@ -249,9 +256,28 @@ class TestFilterCompilation:
         }
         compiled = compile_config(config)
         assert "_compiled_filter" in compiled["tables"]["measurement"]
-        conditions = compiled["tables"]["measurement"]["_compiled_filter"]
-        assert conditions[0]["field"] == "measurement_concept_id"
-        assert conditions[0]["op"] == "!="
+        groups = compiled["tables"]["measurement"]["_compiled_filter"]
+        assert groups[0][0]["field"] == "measurement_concept_id"
+        assert groups[0][0]["op"] == "!="
+
+    def test_compile_filter_list_in_config(self):
+        """List of strings in config = each predicate ORed."""
+        config = {
+            "tables": {
+                "observation": {
+                    "filter": [
+                        "@observation_concept_id != 2000006253",
+                        "@value_as_number IS NOT NULL OR @value_as_string IS NOT NULL",
+                    ],
+                    "time_start": "@observation_datetime",
+                    "code": "$omop:@observation_concept_id",
+                }
+            }
+        }
+        compiled = compile_config(config)
+        groups = compiled["tables"]["observation"]["_compiled_filter"]
+        # Three OR groups: the != predicate, value_as_number not null, value_as_string not null
+        assert len(groups) == 3
 
 
 class TestFilterApplication:
@@ -343,6 +369,41 @@ class TestFilterApplication:
 
         assert len(result) == 2
         assert set(result["code"].to_list()) == {"LOINC/A", "LOINC/B"}
+
+    def test_apply_or_filter(self):
+        """OR-of-AND groups: keep rows matching ANY group."""
+        df = pl.DataFrame(
+            {
+                "concept_id": [100, 200, 300, 400],
+                "value_as_number": [1.0, None, None, None],
+                "value_as_string": [None, "abc", None, None],
+            }
+        )
+        # OR groups: row kept if value_as_number is not null OR value_as_string is not null
+        groups = [
+            [{"field": "value_as_number", "op": "is_not_null"}],
+            [{"field": "value_as_string", "op": "is_not_null"}],
+        ]
+        result = apply_filter_conditions(df, groups)
+        assert result["concept_id"].to_list() == [100, 200]
+
+    def test_apply_or_with_and_group(self):
+        """OR between an AND group and a simple condition."""
+        df = pl.DataFrame(
+            {
+                "concept_id": [0, 100, 200, 300],
+                "value": [5.0, None, 3.0, None],
+            }
+        )
+        # Group 1: concept_id != 0 AND value IS NOT NULL (rows 2)
+        # Group 2: concept_id == 0 (rows 0)
+        # Result: rows 0 and 2
+        groups = [
+            [{"field": "concept_id", "op": "!=", "value": 0}, {"field": "value", "op": "is_not_null"}],
+            [{"field": "concept_id", "op": "==", "value": 0}],
+        ]
+        result = apply_filter_conditions(df, groups)
+        assert result["concept_id"].to_list() == [0, 200]
 
 
 # ============================================================================
@@ -845,21 +906,93 @@ class TestRelationshipResolution:
         # source anchor → source code STANFORD_MEAS/GLUCOSE is acceptable
         assert codes[0] == "STANFORD_MEAS/GLUCOSE"
 
-    def test_config_schema_validates_omop_concept_tables(self):
-        """The schema validator accepts valid vocabulary config."""
-        config = {
-            "vocabulary": {
-                "$omop": ["concept", "concept_relationship"],
-            },
-            "tables": {
-                "measurement": {
-                    "time_start": "@measurement_datetime",
-                    "code": "$omop:@measurement_concept_id",
+    def test_standard_only_filters_non_standard_concepts(self, concept_df, meds_schema):
+        """With standard_only=True, non-standard concepts produce null codes."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1, 2],
+                "measurement_datetime": [
+                    datetime.datetime(2024, 1, 1),
+                    datetime.datetime(2024, 1, 2),
+                ],
+                "measurement_concept_id": [1001, 3001],
+            }
+        )
+
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id",
                 }
             },
+            "time_start": "measurement_datetime",
         }
-        errors = validate_config_schema(config)
-        assert not any("vocabulary" in e for e in errors)
+
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            standard_only=True,
+        )
+
+        codes = result["code"].to_list()
+        # concept 1001 (STANFORD_MEAS, standard_concept=NULL) → filtered out
+        # concept 3001 (LOINC, standard_concept='S') → kept
+        assert len(result) == 1
+        assert codes[0] == "LOINC/2339-0"
+
+    def test_standard_only_false_keeps_non_standard(self, concept_df, meds_schema):
+        """With standard_only=False (default), non-standard concepts are kept."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1, 2],
+                "measurement_datetime": [
+                    datetime.datetime(2024, 1, 1),
+                    datetime.datetime(2024, 1, 2),
+                ],
+                "measurement_concept_id": [1001, 3001],
+            }
+        )
+
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id",
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            standard_only=False,
+        )
+
+        assert len(result) == 2
+
+    def test_config_schema_validates_omop_concept_tables(self):
+        """The schema validator accepts valid vocabulary config (list and object form)."""
+        for omop_val in [
+            ["concept", "concept_relationship"],
+            {"sources": ["concept", "concept_relationship"], "standard_only": True},
+        ]:
+            config = {
+                "vocabulary": {"$omop": omop_val},
+                "tables": {
+                    "measurement": {
+                        "time_start": "@measurement_datetime",
+                        "code": "$omop:@measurement_concept_id",
+                    }
+                },
+            }
+            errors = validate_config_schema(config)
+            assert not any("vocabulary" in e for e in errors), f"Failed for {omop_val}: {errors}"
 
     def test_config_schema_rejects_invalid_omop_concept_tables(self):
         """The schema validator rejects invalid entries in vocabulary.$omop."""

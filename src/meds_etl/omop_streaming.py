@@ -32,6 +32,7 @@ from meds_etl.omop_common import (  # noqa: F401
     collect_stage1_tasks,
     config_requires_concept_lookup,
     config_requires_relationship_mapping,
+    config_requires_standard_only,
     config_type_to_polars,
     describe_code_mapping,
     fast_scan_file_for_concept_ids,
@@ -570,6 +571,7 @@ def run_omop_to_meds_streaming(
             concept_df_data=concept_df_data,
             compression="lz4",
             relationship_map_data=relationship_map_data,
+            standard_only=config_requires_standard_only(config),
         )
 
         print(f"\nProcessing {len(tasks)} files with {num_workers} workers...")

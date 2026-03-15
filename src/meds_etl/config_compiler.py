@@ -503,7 +503,16 @@ def _compile_table_config(table_config: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(raw_filter, str):
             compiled["_compiled_filter"] = compile_filter_expression(raw_filter)
         elif isinstance(raw_filter, list):
-            compiled["_compiled_filter"] = raw_filter
+            # List of strings: each string is a predicate, ORed together
+            all_groups: List = []
+            for entry in raw_filter:
+                if isinstance(entry, str):
+                    all_groups.extend(compile_filter_expression(entry))
+                elif isinstance(entry, dict):
+                    all_groups.append([entry])
+                elif isinstance(entry, list):
+                    all_groups.append(entry)
+            compiled["_compiled_filter"] = all_groups
         # else: pass through as-is
 
     return compiled
@@ -517,8 +526,8 @@ def _compile_table_config(table_config: Dict[str, Any]) -> Dict[str, Any]:
 _FILTER_OPS = ["!=", ">=", "<=", "==", ">", "<"]
 
 
-def compile_filter_expression(expr: str) -> List[Dict[str, Any]]:
-    """Compile a filter expression string into structured conditions.
+def compile_filter_expression(expr: str) -> List[List[Dict[str, Any]]]:
+    """Compile a filter expression string into structured OR-of-AND groups.
 
     Supports:
       - ``@field != value``
@@ -526,22 +535,27 @@ def compile_filter_expression(expr: str) -> List[Dict[str, Any]]:
       - ``@field > value`` / ``@field < value`` / ``@field >= value`` / ``@field <= value``
       - ``@field IS NOT NULL`` / ``@field IS NULL``
       - ``@field IN (value1, value2, ...)``
-      - Multiple conditions joined with ``AND``
+      - Multiple conditions joined with ``AND`` (within a group)
+      - Multiple groups joined with ``OR``
 
-    Returns a list of condition dicts, all implicitly AND-ed together.
+    Returns a list of groups (OR-ed). Each group is a list of conditions (AND-ed).
     """
-    conditions: List[Dict[str, Any]] = []
+    or_groups: List[List[Dict[str, Any]]] = []
 
-    # Split on AND (case-insensitive, whole-word)
-    parts = re.split(r"\s+AND\s+", expr, flags=re.IGNORECASE)
+    # Split on OR (case-insensitive, whole-word), avoiding "IS NOT NULL" false matches
+    or_parts = re.split(r"\s+OR\s+", expr, flags=re.IGNORECASE)
 
-    for part in parts:
-        part = part.strip()
-        condition = _parse_single_condition(part)
-        if condition:
-            conditions.append(condition)
+    for or_part in or_parts:
+        and_parts = re.split(r"\s+AND\s+", or_part.strip(), flags=re.IGNORECASE)
+        group: List[Dict[str, Any]] = []
+        for and_part in and_parts:
+            condition = _parse_single_condition(and_part.strip())
+            if condition:
+                group.append(condition)
+        if group:
+            or_groups.append(group)
 
-    return conditions
+    return or_groups
 
 
 def _parse_single_condition(s: str) -> Optional[Dict[str, Any]]:

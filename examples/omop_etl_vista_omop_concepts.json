@@ -2,7 +2,10 @@
     "omop_cdm_version": "5.3.1",
     "primary_key": "person_id",
     "vocabulary": {
-        "$omop": ["concept", "concept_relationship"]
+        "$omop": {
+            "sources": ["concept", "concept_relationship"],
+            "standard_only": true
+        }
     },
     "canonical_events": {
         "birth": {

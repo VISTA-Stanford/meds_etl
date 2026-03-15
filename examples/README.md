@@ -31,7 +31,7 @@ This directory contains example JSON configs for converting OMOP CDM data to MED
 | `primary_key` | No | Patient identifier column (default: `person_id`) |
 | `canonical_events` | No | Demographic/lifecycle events (birth, death, gender, race, ethnicity) |
 | `tables` | Yes | Map of OMOP table names to event extraction configs |
-| `vocabulary` | No | Configures `$prefix:` operators; e.g., `{"$omop": ["concept", "concept_relationship"]}` |
+| `vocabulary` | No | Configures `$prefix:` operators; e.g., `{"$omop": {"sources": ["concept"], "standard_only": true}}` |
 
 ### Table Config Keys
 
@@ -141,7 +141,25 @@ Use the `filter` key on a table config to restrict which rows are processed:
 }
 ```
 
-Supported filter operators: `!=`, `==`, `>`, `<`, `>=`, `<=`, `IS NULL`, `IS NOT NULL`, `IN (...)`. Combine conditions with `AND`.
+For multiple predicates combined with OR, use a list of strings:
+
+```json
+"observation": {
+    "filter": [
+        "@observation_concept_id != 2000006253",
+        "@value_as_number IS NOT NULL OR @value_as_string IS NOT NULL"
+    ],
+    "time_start": "@observation_datetime",
+    "code": "$omop:@observation_concept_id"
+}
+```
+
+| Format | Semantics |
+|--------|-----------|
+| String | Single predicate (can contain `AND` and `OR` internally) |
+| List of strings | Each string is a predicate; all ORed together (keep row if ANY matches) |
+
+Supported filter operators: `!=`, `==`, `>`, `<`, `>=`, `<=`, `IS NULL`, `IS NOT NULL`, `IN (...)`. Combine conditions with `AND` or `OR`.
 
 ## Choosing a Code Strategy
 
@@ -155,12 +173,15 @@ Supported filter operators: `!=`, `==`, `>`, `<`, `>=`, `<=`, `IS NULL`, `IS NOT
 
 Some OMOP datasets (e.g., Stanford) include site-specific custom concepts (concept_id > 2 billion) with vocabularies like `STANFORD_MEAS`, `STANFORD_PROC`, etc. These custom concepts have "Maps to" relationships in the OMOP `concept_relationship` table that resolve to standard concepts (SNOMED, CVX, RxNorm Extension, etc.).
 
-By default, the `$omop:` operator only uses the `concept` table for lookups. To also resolve custom source concepts through `concept_relationship`, configure the `vocabulary` key:
+By default, the `$omop:` operator only uses the `concept` table for lookups. To also resolve custom source concepts through `concept_relationship` and restrict output to standard concepts, configure the `vocabulary` key:
 
 ```json
 {
     "vocabulary": {
-        "$omop": ["concept", "concept_relationship"]
+        "$omop": {
+            "sources": ["concept", "concept_relationship"],
+            "standard_only": true
+        }
     },
     "tables": {
         "measurement": {
@@ -172,6 +193,13 @@ By default, the `$omop:` operator only uses the `concept` table for lookups. To 
 }
 ```
 
+The `vocabulary.$omop` config accepts either a shorthand list (`["concept"]`) or an object with:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `sources` | list | `["concept"]` | OMOP tables used for resolution |
+| `standard_only` | bool | `false` | Only emit standard concepts (`standard_concept = 'S'`) |
+
 When `"concept_relationship"` is included, the ETL will:
 
 1. Load the `concept_relationship` table and filter to `relationship_id = "Maps to"` where the source concept is a custom/site-specific concept (concept_id >= 2,000,000,000)
@@ -181,7 +209,8 @@ When `"concept_relationship"` is included, the ETL will:
 
 This is strictly additive — standard OMOP concepts (concept_id < 2B) are always resolved directly through the `concept` table and are never affected by concept_relationship. The relationship resolution only kicks in for custom/site-specific concepts that would otherwise resolve to non-standard vocabulary codes (e.g., `STANFORD_MEAS/GLUCOSE` instead of `SNOMED/166900001`).
 
-| `vocabulary.$omop` value | Behavior |
+| `vocabulary.$omop` config | Behavior |
 |--------------------------|----------|
-| `["concept"]` (default when `vocabulary` is omitted) | Direct concept table lookup only |
-| `["concept", "concept_relationship"]` | Also walk "Maps to" chains for custom source concepts (concept_id >= 2B) |
+| `["concept"]` (default when omitted) | Direct concept table lookup only, all concepts |
+| `{"sources": ["concept"], "standard_only": true}` | Direct lookup, standard concepts only |
+| `{"sources": ["concept", "concept_relationship"], "standard_only": true}` | Standard concepts + "Maps to" resolution for custom concepts |

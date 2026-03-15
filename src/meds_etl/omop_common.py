@@ -350,11 +350,25 @@ def config_requires_concept_lookup(config: Dict[str, Any]) -> bool:
     return False
 
 
+def _get_omop_vocab_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize the vocabulary.$omop config to object form."""
+    vocab = config.get("vocabulary", {})
+    omop = vocab.get("$omop", [])
+    if isinstance(omop, list):
+        return {"sources": omop}
+    if isinstance(omop, dict):
+        return omop
+    return {}
+
+
 def config_requires_relationship_mapping(config: Dict[str, Any]) -> bool:
     """Check whether the config uses concept_relationship for $omop: resolution."""
-    vocab = config.get("vocabulary", {})
-    omop_sources = vocab.get("$omop", [])
-    return "concept_relationship" in omop_sources
+    return "concept_relationship" in _get_omop_vocab_config(config).get("sources", [])
+
+
+def config_requires_standard_only(config: Dict[str, Any]) -> bool:
+    """Check whether the config restricts $omop: to standard concepts only."""
+    return _get_omop_vocab_config(config).get("standard_only", False) is True
 
 
 def describe_code_mapping(
@@ -810,37 +824,70 @@ def find_omop_table_files(omop_dir: Path, table_name: str) -> List[Path]:
 # ============================================================================
 
 
-def apply_filter_conditions(df: pl.DataFrame, conditions: List[Dict[str, Any]]) -> pl.DataFrame:
+def _build_condition_expr(cond: Dict[str, Any], columns: set) -> Optional[pl.Expr]:
+    """Build a Polars filter expression from a single condition dict."""
+    field = cond["field"]
+    op = cond["op"]
+
+    if field not in columns:
+        return None
+
+    if op == "is_not_null":
+        return pl.col(field).is_not_null()
+    elif op == "is_null":
+        return pl.col(field).is_null()
+    elif op == "in":
+        return pl.col(field).is_in(cond["value"])
+    elif op == "!=":
+        return pl.col(field) != cond["value"]
+    elif op == "==":
+        return pl.col(field) == cond["value"]
+    elif op == ">":
+        return pl.col(field) > cond["value"]
+    elif op == "<":
+        return pl.col(field) < cond["value"]
+    elif op == ">=":
+        return pl.col(field) >= cond["value"]
+    elif op == "<=":
+        return pl.col(field) <= cond["value"]
+    return None
+
+
+def apply_filter_conditions(df: pl.DataFrame, conditions: List[Any]) -> pl.DataFrame:
     """Apply compiled filter conditions to a DataFrame.
 
-    Each condition dict has ``field``, ``op``, and optionally ``value``.
-    All conditions are AND-ed together.
+    Accepts two formats:
+    - OR-of-AND groups: ``[[cond, cond], [cond]]`` — groups are ORed, conditions
+      within each group are ANDed.
+    - Legacy flat list: ``[cond, cond]`` — all conditions ANDed (backwards compatible).
     """
-    for cond in conditions:
-        field = cond["field"]
-        op = cond["op"]
+    if not conditions:
+        return df
 
-        if field not in df.columns:
-            continue
+    columns = set(df.columns)
 
-        if op == "is_not_null":
-            df = df.filter(pl.col(field).is_not_null())
-        elif op == "is_null":
-            df = df.filter(pl.col(field).is_null())
-        elif op == "in":
-            df = df.filter(pl.col(field).is_in(cond["value"]))
-        elif op == "!=":
-            df = df.filter(pl.col(field) != cond["value"])
-        elif op == "==":
-            df = df.filter(pl.col(field) == cond["value"])
-        elif op == ">":
-            df = df.filter(pl.col(field) > cond["value"])
-        elif op == "<":
-            df = df.filter(pl.col(field) < cond["value"])
-        elif op == ">=":
-            df = df.filter(pl.col(field) >= cond["value"])
-        elif op == "<=":
-            df = df.filter(pl.col(field) <= cond["value"])
+    # Detect format: if first element is a list, it's OR-of-AND groups
+    if isinstance(conditions[0], list):
+        or_exprs: List[pl.Expr] = []
+        for group in conditions:
+            and_exprs = [_build_condition_expr(c, columns) for c in group]
+            and_exprs = [e for e in and_exprs if e is not None]
+            if and_exprs:
+                combined = and_exprs[0]
+                for e in and_exprs[1:]:
+                    combined = combined & e
+                or_exprs.append(combined)
+        if or_exprs:
+            final = or_exprs[0]
+            for e in or_exprs[1:]:
+                final = final | e
+            df = df.filter(final)
+    else:
+        # Legacy flat list: all conditions ANDed
+        for cond in conditions:
+            expr = _build_condition_expr(cond, columns)
+            if expr is not None:
+                df = df.filter(expr)
 
     return df
 
@@ -934,6 +981,7 @@ def transform_to_meds_unsorted(
     concept_df: Optional[pl.DataFrame] = None,
     fixed_code: Optional[str] = None,
     relationship_map_df: Optional[pl.DataFrame] = None,
+    standard_only: bool = False,
 ) -> pl.DataFrame:
     """
     Transform OMOP DataFrame to MEDS Unsorted format.
@@ -946,6 +994,8 @@ def transform_to_meds_unsorted(
         relationship_map_df: Optional DataFrame with [source_concept_id, resolved_code]
             from concept_relationship "Maps to" chains. When provided, source concept IDs
             are resolved through this map before falling back to the regular concept lookup.
+        standard_only: When True, the primary concept table join only matches standard
+            concepts (standard_concept = 'S'). Non-standard concepts produce null codes.
     """
     # 0. Apply row-level filter (if configured)
     compiled_filter = table_config.get("_compiled_filter")
@@ -985,6 +1035,7 @@ def transform_to_meds_unsorted(
     concept_join_alias = None
     concept_join_field = "code"
     code_is_fixed = False
+    _single_join_is_standard_anchor = False
 
     if fixed_code:
         code_is_fixed = True
@@ -1058,6 +1109,7 @@ def transform_to_meds_unsorted(
                 needs_concept_join = True
                 concept_join_alias = "code_concept_lookup"
                 concept_join_field = concept_config.get("concept_field", "code")
+                _single_join_is_standard_anchor = False
 
                 # When both source_concept_id and concept_id are present, keep them
                 # as separate columns so each gets its own concept table join.
@@ -1077,6 +1129,7 @@ def transform_to_meds_unsorted(
                     else:
                         base_exprs.append(exprs_to_coalesce[0].alias("concept_id"))
                 elif concept_id_field:
+                    _single_join_is_standard_anchor = True
                     exprs_to_coalesce = [pl.col(concept_id_field).cast(pl.Int64)]
                     if fallback_concept_id is not None:
                         exprs_to_coalesce.append(pl.lit(fallback_concept_id).cast(pl.Int64))
@@ -1224,7 +1277,12 @@ def transform_to_meds_unsorted(
             primary_join_alias = f"{join_alias}_primary"
             source_join_alias = f"{join_alias}_source"
 
-            primary_join_df = concept_df.select(
+            # When standard_only, filter primary join to standard concepts only
+            primary_concept_df = concept_df
+            if standard_only and "standard_concept" in concept_df.columns:
+                primary_concept_df = concept_df.filter(pl.col("standard_concept") == "S")
+
+            primary_join_df = primary_concept_df.select(
                 pl.col("concept_id"),
                 pl.col(concept_join_field).alias(primary_join_alias),
             )
@@ -1270,7 +1328,12 @@ def transform_to_meds_unsorted(
                 drop_cols.append("_fallback_concept_id")
             result = result.drop([c for c in drop_cols if c in result.columns])
         else:
-            join_df = concept_df.select(
+            # Single-column join path
+            single_concept_df = concept_df
+            if standard_only and _single_join_is_standard_anchor and "standard_concept" in concept_df.columns:
+                single_concept_df = concept_df.filter(pl.col("standard_concept") == "S")
+
+            join_df = single_concept_df.select(
                 [
                     pl.col("concept_id"),
                     pl.col(concept_join_field).alias(join_alias),
@@ -1374,12 +1437,28 @@ def process_omop_file_worker(args: Tuple) -> Dict:
     Worker function to process a single OMOP file.
 
     Reads OMOP Parquet → transforms to MEDS Unsorted → writes output.
-    Accepts a tuple of 10 or 11 elements (11th is relationship_map_data).
-    Falls back to "zstd" compression and no relationship map for shorter tuples.
+    Accepts a tuple of 10, 11, or 12 elements.
+    Falls back to "zstd" compression, no relationship map, and standard_only=False for shorter tuples.
     """
     relationship_map_data = None
+    standard_only = False
 
-    if len(args) == 11:
+    if len(args) == 12:
+        (
+            file_path,
+            table_name,
+            table_config,
+            primary_key,
+            output_dir,
+            meds_schema,
+            concept_df_data,
+            is_canonical,
+            fixed_code,
+            compression,
+            relationship_map_data,
+            standard_only,
+        ) = args
+    elif len(args) == 11:
         (
             file_path,
             table_name,
@@ -1449,6 +1528,7 @@ def process_omop_file_worker(args: Tuple) -> Dict:
             concept_df=concept_df,
             fixed_code=fixed_code,
             relationship_map_df=relationship_map_df,
+            standard_only=standard_only,
         )
 
         output_rows = len(meds_df)
@@ -1502,6 +1582,7 @@ def collect_stage1_tasks(
     concept_df_data: Optional[bytes],
     compression: str = "zstd",
     relationship_map_data: Optional[bytes] = None,
+    standard_only: bool = False,
 ) -> List[Tuple]:
     """
     Collect all Stage 1 processing tasks from config.
@@ -1539,6 +1620,7 @@ def collect_stage1_tasks(
                     fixed_code,
                     compression,
                     relationship_map_data,
+                    standard_only,
                 )
             )
 
@@ -1559,6 +1641,7 @@ def collect_stage1_tasks(
                     None,
                     compression,
                     relationship_map_data,
+                    standard_only,
                 )
             )
 

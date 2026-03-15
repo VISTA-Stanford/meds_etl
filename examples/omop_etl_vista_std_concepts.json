@@ -2,7 +2,13 @@
     "omop_cdm_version": "5.3.1",
     "primary_key": "person_id",
     "vocabulary": {
-        "$omop": ["concept", "concept_relationship"]
+        "$omop": {
+            "sources": [
+                "concept",
+                "concept_relationship"
+            ],
+            "standard_only": true
+        }
     },
     "canonical_events": {
         "birth": {
@@ -264,6 +270,10 @@
             "code": "$omop:@observation_concept_id",
             "numeric_value": "@value_as_number",
             "text_value": "@value_as_string",
+            "filter": [
+                "@observation_concept_id != 2000006253",
+                "@value_as_number IS NOT NULL OR @value_as_string IS NOT NULL"
+            ],
             "properties": [
                 {
                     "name": "table",
