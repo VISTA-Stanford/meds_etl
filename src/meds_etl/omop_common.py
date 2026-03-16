@@ -194,6 +194,34 @@ def validate_config_against_data(omop_dir: Path, config: Dict, verbose: bool = F
             errors.append(f"Table '{table_name}': Error reading schema: {e}")
             continue
 
+        pre_join_columns: Dict[str, pl.DataType] = {}
+        for tc in configs:
+            for spec in tc.get("pre_join", []):
+                join_table = spec.get("table", "")
+                join_dir = omop_dir / join_table
+                join_sample = None
+                if join_dir.is_dir():
+                    join_parquets = list(join_dir.glob("*.parquet"))
+                    if join_parquets:
+                        join_sample = join_parquets[0]
+                elif (omop_dir / f"{join_table}.parquet").exists():
+                    join_sample = omop_dir / f"{join_table}.parquet"
+                if join_sample:
+                    try:
+                        join_schema = pl.scan_parquet(join_sample).collect_schema()
+                        join_schema = {col.lower(): dtype for col, dtype in join_schema.items()}
+                        select_cols = spec.get("select", [])
+                        for col_name in select_cols:
+                            col_lower = col_name.lower()
+                            if col_lower in join_schema:
+                                pre_join_columns[col_lower] = join_schema[col_lower]
+                    except Exception:
+                        pass
+        if pre_join_columns:
+            merged = dict(df_schema)
+            merged.update(pre_join_columns)
+            df_schema = pl.Schema(merged)
+
         for table_config in configs:
             subject_id_field = table_config.get("subject_id_field", config.get("primary_key", "person_id"))
             if subject_id_field not in df_schema.names():
