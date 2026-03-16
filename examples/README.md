@@ -44,6 +44,7 @@ This directory contains example JSON configs for converting OMOP CDM data to MED
 | `text_value` | No | Column reference for text values |
 | `filter` | No | Row-level filter expression (e.g., `@concept_id != 0`) |
 | `exempt_codes` | No | List of code strings that bypass the `standard_only` filter |
+| `pre_join` | No | Enrich rows by joining a reference table before transform |
 | `properties` | No | Array of additional properties to extract |
 
 ### Property Objects
@@ -177,6 +178,32 @@ When `standard_only` is set in the vocabulary config, concepts not matching the 
 ```
 
 This is useful when upstream OMOP mapping assigns a non-standard concept (e.g., a LOINC hierarchy node) that is still clinically meaningful and needed for downstream compatibility (e.g., tokenizer vocabularies). Exempt codes bypass the `standard_only` filter but are still resolved through the concept table — they are a last resort after standard concept lookup and relationship resolution both fail.
+
+### Pre-Join Reference Tables
+
+Use `pre_join` to enrich source rows with columns from an OMOP reference table before the transform runs. This is useful for resolving IDs to human-readable names (e.g., `care_site_id` → `care_site_name`):
+
+```json
+"visit_detail": {
+    "pre_join": [
+        {
+            "table": "care_site",
+            "on": "care_site_id",
+            "select": ["care_site_name"]
+        }
+    ],
+    "code": "CARE_SITE/{@care_site_name}",
+    ...
+}
+```
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `table` | Yes | OMOP table name to join (e.g., `care_site`, `provider`, `location`) |
+| `on` | Yes | Column name to join on (must exist in both source and reference table) |
+| `select` | No | List of columns to bring in from the reference table (default: all) |
+
+The reference table is loaded once at pipeline startup and reused across all file shards. Multiple `pre_join` entries can be specified per table. The join is a left join — rows with no match in the reference table get null values for the joined columns.
 
 ## Choosing a Code Strategy
 

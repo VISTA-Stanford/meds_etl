@@ -52,8 +52,10 @@ _EVENT_TABLE_KEYS = {
     "metadata",
     "filter",
     "exempt_codes",
+    "pre_join",
     # Compiled keys (produced by config_compiler, not user-written)
     "_compiled_filter",
+    "_pre_join_data",
 }
 
 _PROPERTY_KEYS = {
@@ -230,6 +232,29 @@ def _validate_event_or_table(
         ec = config["exempt_codes"]
         if not isinstance(ec, list) or not all(isinstance(c, str) for c in ec):
             errors.append(f"{section} '{name}': 'exempt_codes' must be a list of strings")
+
+    # Validate pre_join
+    if "pre_join" in config:
+        pj = config["pre_join"]
+        if not isinstance(pj, list):
+            errors.append(f"{section} '{name}': 'pre_join' must be a list")
+        else:
+            _valid_pre_join_keys = {"table", "on", "select"}
+            for i, spec in enumerate(pj):
+                if not isinstance(spec, dict):
+                    errors.append(f"{section} '{name}' pre_join[{i}]: must be a dict")
+                    continue
+                for k in spec:
+                    if k not in _valid_pre_join_keys:
+                        errors.append(f"{section} '{name}' pre_join[{i}]: unknown key '{k}'")
+                if "table" not in spec:
+                    errors.append(f"{section} '{name}' pre_join[{i}]: missing required key 'table'")
+                if "on" not in spec:
+                    errors.append(f"{section} '{name}' pre_join[{i}]: missing required key 'on'")
+                if "select" in spec:
+                    sel = spec["select"]
+                    if not isinstance(sel, list) or not all(isinstance(s, str) for s in sel):
+                        errors.append(f"{section} '{name}' pre_join[{i}]: 'select' must be a list of strings")
 
     # Validate numeric_value / text_value
     for field_key in ("numeric_value", "text_value"):

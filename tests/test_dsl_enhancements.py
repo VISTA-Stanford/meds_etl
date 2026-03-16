@@ -1522,3 +1522,112 @@ class TestRelationshipResolution:
         }
         errors = validate_config_schema(config)
         assert not any("standard_only" in e for e in errors)
+
+
+class TestPreJoin:
+    """Test pre_join reference table enrichment."""
+
+    @pytest.fixture
+    def meds_schema(self):
+        return {
+            "subject_id": pl.Int64,
+            "time": pl.Datetime("us"),
+            "code": pl.Utf8,
+            "numeric_value": pl.Float32,
+            "text_value": pl.Utf8,
+            "end": pl.Datetime("us"),
+        }
+
+    def test_pre_join_enriches_dataframe(self, meds_schema):
+        """pre_join adds columns from a reference table before transform."""
+        import pickle
+
+        care_site_df = pl.DataFrame(
+            {
+                "care_site_id": [100, 200, 300],
+                "care_site_name": ["Emergency Dept", "ICU North", "Outpatient Clinic"],
+            }
+        )
+
+        df = pl.DataFrame(
+            {
+                "person_id": [1, 2, 3],
+                "visit_detail_start_datetime": [
+                    datetime.datetime(2024, 1, 1),
+                    datetime.datetime(2024, 1, 2),
+                    datetime.datetime(2024, 1, 3),
+                ],
+                "care_site_id": [100, 200, 999],
+            }
+        )
+
+        table_config = {
+            "time_start": "visit_detail_start_datetime",
+            "code_mappings": {
+                "source_value": {"template": "CARE_SITE/{care_site_name}"},
+            },
+            "_pre_join_data": [
+                {
+                    "on": "care_site_id",
+                    "select": ["care_site_name"],
+                    "df_bytes": pickle.dumps(care_site_df),
+                }
+            ],
+        }
+
+        # Simulate worker: apply pre_join then transform
+        pre_join_data = table_config.get("_pre_join_data", [])
+        for join_spec in pre_join_data:
+            join_df = pickle.loads(join_spec["df_bytes"])
+            on_col = join_spec["on"]
+            if on_col in df.columns:
+                df = df.join(join_df, on=on_col, how="left")
+
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+        )
+
+        codes = result["code"].to_list()
+        # Row 1: care_site_id 100 → "Emergency Dept"
+        assert codes[0] == "CARE_SITE/Emergency Dept"
+        # Row 2: care_site_id 200 → "ICU North"
+        assert codes[1] == "CARE_SITE/ICU North"
+        # Row 3: care_site_id 999 → null join → "CARE_SITE/" (null name becomes empty string in concat)
+        assert len(result) == 3
+
+    def test_pre_join_schema_validation(self):
+        """The schema validator accepts valid pre_join configs."""
+        config = {
+            "tables": {
+                "visit_detail": {
+                    "time_start": "@visit_detail_start_datetime",
+                    "code": "CARE_SITE/{@care_site_name}",
+                    "pre_join": [
+                        {
+                            "table": "care_site",
+                            "on": "care_site_id",
+                            "select": ["care_site_name"],
+                        }
+                    ],
+                }
+            },
+        }
+        errors = validate_config_schema(config)
+        assert not any("pre_join" in e for e in errors)
+
+    def test_pre_join_schema_rejects_invalid(self):
+        """The schema validator rejects pre_join with missing required keys."""
+        config = {
+            "tables": {
+                "visit_detail": {
+                    "time_start": "@visit_detail_start_datetime",
+                    "code": "CARE_SITE/{@care_site_name}",
+                    "pre_join": [{"table": "care_site"}],
+                }
+            },
+        }
+        errors = validate_config_schema(config)
+        assert any("on" in e for e in errors)

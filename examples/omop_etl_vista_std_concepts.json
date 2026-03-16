@@ -111,7 +111,14 @@
         "visit_detail": {
             "time_start": "@visit_detail_start_datetime || @visit_detail_start_date",
             "time_end": "@visit_detail_end_datetime || @visit_detail_end_date",
-            "code": "STANFORD_VISIT_DETAIL/{@visit_detail_source_value >> split('|', 3, 'Unknown')}",
+            "code": "CARE_SITE/{@care_site_name}",
+            "pre_join": [
+                {
+                    "table": "care_site",
+                    "on": "care_site_id",
+                    "select": ["care_site_name"]
+                }
+            ],
             "properties": [
                 {
                     "name": "table",

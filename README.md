@@ -104,6 +104,7 @@ The JSON config file tells the ETL **which OMOP tables to process** and **how to
 | `{@col >> transform()}` | Transform pipe | `{@note_title >> regex_replace('\\s+', '-')}` |
 | `filter` | Row-level filtering | `"@concept_id != 0"` or `["pred1", "pred2"]` (ORed) |
 | `exempt_codes` | Bypass `standard_only` for specific codes | `["LOINC/LP21258-6"]` |
+| `pre_join` | Enrich rows from a reference table | `[{"table": "care_site", "on": "care_site_id", "select": ["care_site_name"]}]` |
 | `vocabulary` | Concept resolution config (top-level) | `{"$omop": {"sources": [...], "standard_only": ["S", "C"]}}` |
 
 - **`$omop:` prefix** triggers a join with the OMOP `concept` table, producing codes in `vocabulary_id/concept_code` format.

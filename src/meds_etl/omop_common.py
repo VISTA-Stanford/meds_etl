@@ -1611,6 +1611,14 @@ def process_omop_file_worker(args: Tuple) -> Dict:
         df = pl.read_parquet(file_path)
         df = df.rename({col: col.lower() for col in df.columns})
 
+        # Apply pre_join: enrich DataFrame with columns from reference tables
+        pre_join_data = table_config.get("_pre_join_data", [])
+        for join_spec in pre_join_data:
+            join_df = pickle.loads(join_spec["df_bytes"])
+            on_col = join_spec["on"]
+            if on_col in df.columns:
+                df = df.join(join_df, on=on_col, how="left")
+
         input_rows = len(df)
 
         if input_rows == 0:
@@ -1692,8 +1700,38 @@ def collect_stage1_tasks(
     Collect all Stage 1 processing tasks from config.
 
     Correctly handles canonical events with both fixed codes and template/code_mapping codes.
+    Pre-loads any pre_join reference tables and embeds them in the table config.
     """
     tasks = []
+
+    def _prepare_config_with_pre_joins(table_config: Dict) -> Dict:
+        """Load pre_join tables from omop_dir and embed as _pre_join_data."""
+        pre_joins = table_config.get("pre_join")
+        if not pre_joins:
+            return table_config
+        prepared = table_config.copy()
+        join_data = []
+        for spec in pre_joins:
+            join_table = spec["table"]
+            join_files = find_omop_table_files(omop_dir, join_table)
+            if not join_files:
+                print(f"  ⚠️  pre_join table '{join_table}' not found in {omop_dir}")
+                continue
+            dfs = [pl.read_parquet(f) for f in join_files]
+            join_df = pl.concat(dfs, rechunk=True) if len(dfs) > 1 else dfs[0]
+            join_df = join_df.rename({col: col.lower() for col in join_df.columns})
+            on_col = spec["on"].lower()
+            select_cols = [c.lower() for c in spec.get("select", [])]
+            keep_cols = [on_col] + [c for c in select_cols if c != on_col]
+            available = [c for c in keep_cols if c in join_df.columns]
+            if on_col not in join_df.columns:
+                print(f"  ⚠️  pre_join column '{on_col}' not found in '{join_table}'")
+                continue
+            join_df = join_df.select(available).unique(subset=[on_col])
+            join_data.append({"on": on_col, "select": select_cols, "df_bytes": pickle.dumps(join_df)})
+        if join_data:
+            prepared["_pre_join_data"] = join_data
+        return prepared
 
     for event_name, event_config in config.get("canonical_events", {}).items():
         table_name = event_config["table"]
@@ -1709,13 +1747,14 @@ def collect_stage1_tasks(
             )
 
         is_canonical = fixed_code is not None
+        prepared_config = _prepare_config_with_pre_joins(event_config)
 
         for file_path in files:
             tasks.append(
                 (
                     file_path,
                     table_name,
-                    event_config,
+                    prepared_config,
                     primary_key,
                     unsorted_dir,
                     meds_schema,
@@ -1730,13 +1769,14 @@ def collect_stage1_tasks(
 
     for table_name, table_config in config.get("tables", {}).items():
         files = find_omop_table_files(omop_dir, table_name)
+        prepared_config = _prepare_config_with_pre_joins(table_config)
 
         for file_path in files:
             tasks.append(
                 (
                     file_path,
                     table_name,
-                    table_config,
+                    prepared_config,
                     primary_key,
                     unsorted_dir,
                     meds_schema,
