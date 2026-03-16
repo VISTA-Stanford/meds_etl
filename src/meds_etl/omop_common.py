@@ -611,33 +611,40 @@ def find_concept_id_columns_for_prescan(table_name: str, config: Dict) -> List[s
     """Find all concept_id columns for a table based on config (for pre-scanning)."""
     columns: List[str] = []
 
-    if table_name not in config.get("tables", {}):
+    configs_to_scan: List[Dict] = []
+
+    if table_name in config.get("tables", {}):
+        configs_to_scan.append(config["tables"][table_name])
+
+    for _event_name, event_config in config.get("canonical_events", {}).items():
+        if event_config.get("table") == table_name:
+            configs_to_scan.append(event_config)
+
+    if not configs_to_scan:
         return columns
 
-    table_config = config["tables"][table_name]
-    code_mappings = table_config.get("code_mappings", {})
-    concept_id_config = code_mappings.get("concept_id", {})
+    for table_config in configs_to_scan:
+        code_mappings = table_config.get("code_mappings", {})
+        concept_id_config = code_mappings.get("concept_id", {})
 
-    if not concept_id_config:
+        if concept_id_config:
+            concept_id_field = concept_id_config.get("concept_id_field")
+            if concept_id_field and concept_id_field not in columns:
+                columns.append(concept_id_field)
+
+            source_concept_id_field = concept_id_config.get("source_concept_id_field")
+            if source_concept_id_field and source_concept_id_field not in columns:
+                columns.append(source_concept_id_field)
+
+        text_value_lookup = table_config.get("text_value_field_concept_lookup")
+        if text_value_lookup and text_value_lookup not in columns:
+            columns.append(text_value_lookup)
+
         properties = table_config.get("properties") or table_config.get("metadata", [])
         for prop in properties:
             field = prop.get("concept_lookup_field")
-            if field:
+            if field and field not in columns:
                 columns.append(field)
-        return columns
-
-    concept_id_field = concept_id_config.get("concept_id_field", f"{table_name}_concept_id")
-    columns.append(concept_id_field)
-
-    source_concept_id_field = concept_id_config.get("source_concept_id_field")
-    if source_concept_id_field:
-        columns.append(source_concept_id_field)
-
-    properties = table_config.get("properties") or table_config.get("metadata", [])
-    for prop in properties:
-        field = prop.get("concept_lookup_field")
-        if field:
-            columns.append(field)
 
     return columns
 
@@ -727,6 +734,7 @@ def prescan_concept_ids(
     """
     files_to_scan: List[Tuple[Path, List[str]]] = []
 
+    tables_scanned: set = set()
     for table_name, table_config in config.get("tables", {}).items():
         code_mappings = table_config.get("code_mappings", {})
         if "concept_id" not in code_mappings:
@@ -739,6 +747,19 @@ def prescan_concept_ids(
         table_files = find_omop_table_files(omop_dir, table_name)
         for file_path in table_files:
             files_to_scan.append((file_path, concept_id_columns))
+        tables_scanned.add(table_name)
+
+    for _event_name, event_config in config.get("canonical_events", {}).items():
+        event_table = event_config.get("table")
+        if not event_table or event_table in tables_scanned:
+            continue
+        concept_id_columns = find_concept_id_columns_for_prescan(event_table, config)
+        if not concept_id_columns:
+            continue
+        table_files = find_omop_table_files(omop_dir, event_table)
+        for file_path in table_files:
+            files_to_scan.append((file_path, concept_id_columns))
+        tables_scanned.add(event_table)
 
     if not files_to_scan:
         if verbose:
