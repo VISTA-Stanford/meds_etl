@@ -1631,3 +1631,174 @@ class TestPreJoin:
         }
         errors = validate_config_schema(config)
         assert any("on" in e for e in errors)
+
+
+class TestSourceFirstOrdering:
+    """Test that || ordering in code fields is respected for $omop: fields."""
+
+    @pytest.fixture
+    def concept_df(self):
+        return pl.DataFrame(
+            {
+                "concept_id": [1001, 2001, 3001],
+                "code": ["SOURCE/Glucose", "SNOMED/Standard_Glucose", "LOINC/2339-0"],
+                "concept_code": ["Glucose", "Standard_Glucose", "2339-0"],
+                "concept_name": ["Source Glucose", "Standard Glucose", "Glucose"],
+                "vocabulary_id": ["SOURCE", "SNOMED", "LOINC"],
+                "domain_id": ["Measurement", "Measurement", "Measurement"],
+                "concept_class_id": ["Lab Test", "Clinical Finding", "Lab Test"],
+                "standard_concept": [None, "S", "S"],
+            }
+        )
+
+    @pytest.fixture
+    def relationship_map_df(self):
+        return pl.DataFrame(
+            {
+                "source_concept_id": pl.Series([1001], dtype=pl.Int64),
+                "resolved_code": ["SNOMED/Standard_Glucose"],
+            }
+        )
+
+    @pytest.fixture
+    def meds_schema(self):
+        return {
+            "subject_id": pl.Int64,
+            "time": pl.Datetime("us"),
+            "code": pl.Utf8,
+            "numeric_value": pl.Float32,
+            "text_value": pl.Utf8,
+            "end": pl.Datetime("us"),
+        }
+
+    def test_compiler_emits_source_first_flag(self):
+        """$omop:@source || $omop:@concept sets _source_first in compiled config."""
+        config = {
+            "tables": {
+                "measurement": {
+                    "time_start": "@measurement_datetime",
+                    "code": "$omop:@measurement_source_concept_id || $omop:@measurement_concept_id",
+                }
+            }
+        }
+        compiled = compile_config(config)
+        concept_id_config = compiled["tables"]["measurement"]["code_mappings"]["concept_id"]
+        assert concept_id_config.get("_source_first") is True
+
+    def test_compiler_no_flag_when_concept_first(self):
+        """$omop:@concept || $omop:@source does NOT set _source_first."""
+        config = {
+            "tables": {
+                "measurement": {
+                    "time_start": "@measurement_datetime",
+                    "code": "$omop:@measurement_concept_id || $omop:@measurement_source_concept_id",
+                }
+            }
+        }
+        compiled = compile_config(config)
+        concept_id_config = compiled["tables"]["measurement"]["code_mappings"]["concept_id"]
+        assert "_source_first" not in concept_id_config
+
+    def test_concept_first_uses_concept_id_priority(self, concept_df, relationship_map_df, meds_schema):
+        """Default ordering: concept_id lookup wins over relationship-resolved source."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1],
+                "measurement_datetime": [datetime.datetime(2024, 1, 1)],
+                "measurement_concept_id": [3001],
+                "measurement_source_concept_id": pl.Series([1001], dtype=pl.Int64),
+            }
+        )
+
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id",
+                    "source_concept_id_field": "measurement_source_concept_id",
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            relationship_map_df=relationship_map_df,
+        )
+
+        codes = result["code"].to_list()
+        assert codes[0] == "LOINC/2339-0"
+
+    def test_source_first_uses_relationship_priority(self, concept_df, relationship_map_df, meds_schema):
+        """When _source_first is set, relationship-resolved code wins over concept_id."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1],
+                "measurement_datetime": [datetime.datetime(2024, 1, 1)],
+                "measurement_concept_id": [3001],
+                "measurement_source_concept_id": pl.Series([1001], dtype=pl.Int64),
+            }
+        )
+
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id",
+                    "source_concept_id_field": "measurement_source_concept_id",
+                    "_source_first": True,
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            relationship_map_df=relationship_map_df,
+        )
+
+        codes = result["code"].to_list()
+        # source 1001 → relationship resolves to SNOMED/Standard_Glucose
+        # This should beat concept_id 3001 → LOINC/2339-0
+        assert codes[0] == "SNOMED/Standard_Glucose"
+
+    def test_source_first_falls_through_when_source_is_zero(self, concept_df, relationship_map_df, meds_schema):
+        """When _source_first but source_concept_id=0, falls through to concept_id."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1],
+                "measurement_datetime": [datetime.datetime(2024, 1, 1)],
+                "measurement_concept_id": [3001],
+                "measurement_source_concept_id": pl.Series([0], dtype=pl.Int64),
+            }
+        )
+
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id",
+                    "source_concept_id_field": "measurement_source_concept_id",
+                    "_source_first": True,
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            relationship_map_df=relationship_map_df,
+        )
+
+        codes = result["code"].to_list()
+        # source_concept_id=0 → no relationship match → falls through to concept_id 3001
+        assert codes[0] == "LOINC/2339-0"

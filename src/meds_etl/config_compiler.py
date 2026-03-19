@@ -274,26 +274,33 @@ def convert_code_expression(code: str) -> Optional[Dict[str, Any]]:
     if len(parts) > 1:
         concept_config: Dict[str, Any] = {}
         source_value_config: Dict[str, Any] = {}
+        first_omop_role = None
         for part in parts:
-            # Remove surrounding parentheses if present
             expr = part.strip()
-            # Check for $omop:@field.property pattern
             omop_match = re.match(r"\$omop:@([a-zA-Z_][a-zA-Z0-9_]*)(?:\.([a-zA-Z_][a-zA-Z0-9_]*))?$", expr)
             if omop_match:
                 field = omop_match.group(1)
                 field_selector = omop_match.group(2)
                 role = infer_field_role(field)
+                if first_omop_role is None:
+                    first_omop_role = role
                 concept_config[role] = field
                 if field_selector:
                     concept_config["concept_field"] = field_selector
             elif expr.startswith("$omop:"):
-                # Literal fallback concept id
                 try:
                     concept_config["fallback_concept_id"] = int(expr[len("$omop:") :])
                 except ValueError:
                     pass
             elif expr.startswith("@"):
                 source_value_config["field"] = expr[1:]
+
+        if (
+            "source_concept_id_field" in concept_config
+            and "concept_id_field" in concept_config
+            and first_omop_role == "source_concept_id_field"
+        ):
+            concept_config["_source_first"] = True
 
         result: Dict[str, Any] = {}
         if concept_config:

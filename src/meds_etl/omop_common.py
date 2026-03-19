@@ -1345,6 +1345,7 @@ def transform_to_meds_unsorted(
     # Perform concept join for code (only select needed columns to avoid leaking extras)
     _deferred_source_alias = None
     _deferred_fallback_alias = None
+    primary_join_alias = None
     if needs_concept_join:
         join_alias = concept_join_alias or "code"
         if concept_join_field not in concept_df.columns:
@@ -1479,6 +1480,16 @@ def transform_to_meds_unsorted(
         # and source_concept_id is a custom concept with a "Maps to" chain)
         if rel_alias in result.columns:
             code_candidates.append(rel_alias)
+
+            if (
+                concept_config.get("_source_first")
+                and primary_join_alias is not None
+                and rel_alias in code_candidates
+                and primary_join_alias in code_candidates
+            ):
+                code_candidates.remove(rel_alias)
+                idx = code_candidates.index(primary_join_alias)
+                code_candidates.insert(idx, rel_alias)
 
     # Add deferred source and fallback concept codes as lowest-priority fallbacks.
     # Only used when the anchor column is a source concept (i.e., source_concept_id_field
