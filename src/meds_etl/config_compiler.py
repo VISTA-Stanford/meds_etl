@@ -182,7 +182,7 @@ def convert_new_template_to_old_with_concept_mapping(template: str) -> Optional[
     """
     # Check if this is a simple field reference (not a template)
     # Simple field references should be handled by the simple parser in convert_code_expression
-    if re.fullmatch(r"\$omop:@[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)?", template):
+    if re.fullmatch(r"\$omop(?:\.(?:lookup|resolve))?:@[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)?", template):
         return None  # Let simple parser handle it
     if re.fullmatch(r"@[a-zA-Z_][a-zA-Z0-9_]*", template):
         return None  # Let simple parser handle it
@@ -193,7 +193,9 @@ def convert_new_template_to_old_with_concept_mapping(template: str) -> Optional[
     # Extract concept_id fields from $omop:@field(.property)? patterns
     concept_fields = set()
     concept_field_selectors = {}  # Map field -> property selector
-    for match in re.finditer(r"\$omop:@([a-zA-Z_][a-zA-Z0-9_]*)(?:\.([a-zA-Z_][a-zA-Z0-9_]*))?", template):
+    for match in re.finditer(
+        r"\$omop(?:\.(?:lookup|resolve))?:@([a-zA-Z_][a-zA-Z0-9_]*)(?:\.([a-zA-Z_][a-zA-Z0-9_]*))?", template
+    ):
         field_name = match.group(1)
         field_selector = match.group(2)  # Optional, e.g., "concept_name"
         concept_fields.add(field_name)
@@ -219,7 +221,11 @@ def convert_new_template_to_old_with_concept_mapping(template: str) -> Optional[
     old_template = re.sub(r"\{(@[^}]+)\}", replace_braced_expr, old_template)
 
     # Replace $omop:@field(.property)? with {field} (inside or outside braces)
-    old_template = re.sub(r"\$omop:@([a-zA-Z_][a-zA-Z0-9_]*)(?:\.[a-zA-Z_][a-zA-Z0-9_]*)?", r"{\1}", old_template)
+    old_template = re.sub(
+        r"\$omop(?:\.(?:lookup|resolve))?:@([a-zA-Z_][a-zA-Z0-9_]*)(?:\.[a-zA-Z_][a-zA-Z0-9_]*)?",
+        r"{\1}",
+        old_template,
+    )
     # Already in braces: {$omop:@field} → {{field}} → {field}
     old_template = re.sub(r"\{\{([^}]+)\}\}", r"{\1}", old_template)
 
@@ -515,7 +521,7 @@ def _compile_table_config(table_config: Dict[str, Any]) -> Dict[str, Any]:
             if "value" in new_prop:
                 value = new_prop["value"]
                 if isinstance(value, str):
-                    omop_match = re.match(r"^\$omop:@([a-zA-Z_][a-zA-Z0-9_]*)$", value)
+                    omop_match = re.match(r"^\$omop(?:\.(?:lookup|resolve))?:@([a-zA-Z_][a-zA-Z0-9_]*)$", value)
                     literal_match = re.match(r"^\$literal:(.*)$", value, re.DOTALL)
                     simple_column = value.startswith("@") and not any(
                         c in value for c in ["||", "$", "{", "}", "|", ">>"]
@@ -558,7 +564,7 @@ def _compile_table_config(table_config: Dict[str, Any]) -> Dict[str, Any]:
             del compiled[key]
         elif isinstance(value, str) and is_template_syntax(value):
             # $omop: concept lookup → resolve via concept join
-            omop_match = re.match(r"^\$omop:@([a-zA-Z_][a-zA-Z0-9_]*)$", value)
+            omop_match = re.match(r"^\$omop(?:\.(?:lookup|resolve))?:@([a-zA-Z_][a-zA-Z0-9_]*)$", value)
             if omop_match:
                 compiled[f"{target_key}_concept_lookup"] = omop_match.group(1)
                 del compiled[key]

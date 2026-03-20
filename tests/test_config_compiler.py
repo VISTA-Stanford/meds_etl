@@ -181,5 +181,63 @@ def test_compile_template_with_omop_field():
     assert concept_cfg["template"] == "Gender/{gender_concept_id}"
 
 
+def test_property_omop_lookup_compiles():
+    """$omop.lookup: in property value compiles to concept_lookup_field."""
+    config = {
+        "tables": {
+            "condition_occurrence": {
+                "code": "$omop.lookup:@condition_concept_id",
+                "time_start": "@condition_start_datetime",
+                "properties": [
+                    {"name": "source_code", "value": "$omop.lookup:@condition_source_concept_id", "type": "string"},
+                    {"name": "standard_code", "value": "$omop.lookup:@condition_concept_id", "type": "string"},
+                ],
+            }
+        }
+    }
+    compiled = compile_config(config)
+    props = compiled["tables"]["condition_occurrence"]["properties"]
+    for prop in props:
+        assert "concept_lookup_field" in prop, f"Property '{prop['name']}' was not compiled"
+        assert "value" not in prop, f"Property '{prop['name']}' still has raw 'value'"
+
+
+def test_property_omop_resolve_compiles():
+    """$omop.resolve: in property value compiles to concept_lookup_field."""
+    config = {
+        "tables": {
+            "condition_occurrence": {
+                "code": "$omop.resolve:@condition_source_concept_id",
+                "time_start": "@condition_start_datetime",
+                "properties": [
+                    {"name": "source_code", "value": "$omop.resolve:@condition_source_concept_id", "type": "string"},
+                ],
+            }
+        }
+    }
+    compiled = compile_config(config)
+    props = compiled["tables"]["condition_occurrence"]["properties"]
+    assert props[0].get("concept_lookup_field") == "condition_source_concept_id"
+
+
+def test_text_value_omop_lookup_compiles():
+    """$omop.lookup: in text_value compiles to text_value_field_concept_lookup."""
+    config = {
+        "canonical_events": {
+            "gender": {
+                "table": "person",
+                "code": "MEDS_BIRTH",
+                "time_start": "@birth_datetime",
+                "text_value": "$omop.lookup:@gender_concept_id",
+            }
+        }
+    }
+    compiled = compile_config(config)
+    event = compiled["canonical_events"]["gender"]
+    assert "text_value_field_concept_lookup" in event
+    assert event["text_value_field_concept_lookup"] == "gender_concept_id"
+    assert "text_value" not in event
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
