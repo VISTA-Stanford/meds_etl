@@ -269,7 +269,19 @@ def convert_code_expression(code: str) -> Optional[Dict[str, Any]]:
     Convert code expression with fallbacks into standard code_mappings.
     Supports expressions like "$omop:@source || $omop:@concept || @source_value".
     Also supports field selectors like "$omop:@field.concept_name".
+
+    Explicit vocabulary operations:
+      $omop.lookup:@field  — direct concept table join, no relationship resolution
+      $omop.resolve:@field — resolve via concept_relationship "Maps to"
+      $omop:@field         — backward-compatible (infers operation from field role)
     """
+    # Regex patterns for the three $omop variants
+    _OMOP_LOOKUP = r"\$omop\.lookup:@([a-zA-Z_][a-zA-Z0-9_]*)(?:\.([a-zA-Z_][a-zA-Z0-9_]*))?$"
+    _OMOP_RESOLVE = r"\$omop\.resolve:@([a-zA-Z_][a-zA-Z0-9_]*)(?:\.([a-zA-Z_][a-zA-Z0-9_]*))?$"
+    _OMOP_LEGACY = r"\$omop:@([a-zA-Z_][a-zA-Z0-9_]*)(?:\.([a-zA-Z_][a-zA-Z0-9_]*))?$"
+    _OMOP_LOOKUP_LITERAL = r"\$omop\.lookup:(\d+)$"
+    _OMOP_RESOLVE_LITERAL = r"\$omop\.resolve:(\d+)$"
+
     parts = [part.strip() for part in code.split("||")]
     if len(parts) > 1:
         concept_config: Dict[str, Any] = {}
@@ -277,7 +289,37 @@ def convert_code_expression(code: str) -> Optional[Dict[str, Any]]:
         first_omop_role = None
         for part in parts:
             expr = part.strip()
-            omop_match = re.match(r"\$omop:@([a-zA-Z_][a-zA-Z0-9_]*)(?:\.([a-zA-Z_][a-zA-Z0-9_]*))?$", expr)
+
+            # $omop.lookup:@field — explicit direct concept table join
+            lookup_match = re.match(_OMOP_LOOKUP, expr)
+            if lookup_match:
+                field = lookup_match.group(1)
+                field_selector = lookup_match.group(2)
+                role = infer_field_role(field)
+                if first_omop_role is None:
+                    first_omop_role = role
+                concept_config[role] = field
+                concept_config[f"_{role}_operation"] = "lookup"
+                if field_selector:
+                    concept_config["concept_field"] = field_selector
+                continue
+
+            # $omop.resolve:@field — explicit relationship resolution
+            resolve_match = re.match(_OMOP_RESOLVE, expr)
+            if resolve_match:
+                field = resolve_match.group(1)
+                field_selector = resolve_match.group(2)
+                role = infer_field_role(field)
+                if first_omop_role is None:
+                    first_omop_role = role
+                concept_config[role] = field
+                concept_config[f"_{role}_operation"] = "resolve"
+                if field_selector:
+                    concept_config["concept_field"] = field_selector
+                continue
+
+            # $omop:@field — legacy backward-compatible
+            omop_match = re.match(_OMOP_LEGACY, expr)
             if omop_match:
                 field = omop_match.group(1)
                 field_selector = omop_match.group(2)
@@ -287,7 +329,19 @@ def convert_code_expression(code: str) -> Optional[Dict[str, Any]]:
                 concept_config[role] = field
                 if field_selector:
                     concept_config["concept_field"] = field_selector
-            elif expr.startswith("$omop:"):
+                continue
+
+            # $omop.lookup:<int> or $omop.resolve:<int> fallback literal
+            lookup_lit = re.match(_OMOP_LOOKUP_LITERAL, expr)
+            if lookup_lit:
+                concept_config["fallback_concept_id"] = int(lookup_lit.group(1))
+                continue
+            resolve_lit = re.match(_OMOP_RESOLVE_LITERAL, expr)
+            if resolve_lit:
+                concept_config["fallback_concept_id"] = int(resolve_lit.group(1))
+                continue
+
+            if expr.startswith("$omop:"):
                 try:
                     concept_config["fallback_concept_id"] = int(expr[len("$omop:") :])
                 except ValueError:
@@ -310,13 +364,30 @@ def convert_code_expression(code: str) -> Optional[Dict[str, Any]]:
         if result:
             return result
 
-    # Fallback to template converter
-    conversion = convert_new_template_to_old_with_concept_mapping(code)
-    if conversion:
-        return conversion
+    # Check for single $omop.lookup:@field
+    lookup_match = re.match(_OMOP_LOOKUP, code)
+    if lookup_match:
+        field = lookup_match.group(1)
+        field_selector = lookup_match.group(2)
+        role = infer_field_role(field)
+        result = {"code_mappings": {"concept_id": {role: field, f"_{role}_operation": "lookup"}}}
+        if field_selector:
+            result["code_mappings"]["concept_id"]["concept_field"] = field_selector
+        return result
 
-    # Check for simple $omop:@field(.property)? pattern
-    omop_match = re.match(r"\$omop:@([a-zA-Z_][a-zA-Z0-9_]*)(?:\.([a-zA-Z_][a-zA-Z0-9_]*))?$", code)
+    # Check for single $omop.resolve:@field
+    resolve_match = re.match(_OMOP_RESOLVE, code)
+    if resolve_match:
+        field = resolve_match.group(1)
+        field_selector = resolve_match.group(2)
+        role = infer_field_role(field)
+        result = {"code_mappings": {"concept_id": {role: field, f"_{role}_operation": "resolve"}}}
+        if field_selector:
+            result["code_mappings"]["concept_id"]["concept_field"] = field_selector
+        return result
+
+    # Check for simple $omop:@field(.property)? pattern (legacy)
+    omop_match = re.match(_OMOP_LEGACY, code)
     if omop_match:
         field = omop_match.group(1)
         field_selector = omop_match.group(2)
@@ -324,6 +395,11 @@ def convert_code_expression(code: str) -> Optional[Dict[str, Any]]:
         if field_selector:
             result["code_mappings"]["concept_id"]["concept_field"] = field_selector
         return result
+
+    # Fallback to template converter
+    conversion = convert_new_template_to_old_with_concept_mapping(code)
+    if conversion:
+        return conversion
 
     if code.startswith("@"):
         if "|" in code:

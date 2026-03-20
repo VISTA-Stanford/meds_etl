@@ -171,6 +171,25 @@ def validate_config_schema(config: Dict[str, Any]) -> List[str]:
     # Cross-table property type consistency
     errors.extend(_validate_property_type_consistency(config))
 
+    # Validate that $omop.resolve usage has concept_relationship in vocabulary.sources
+    vocab_config = config.get("vocabulary", {}).get("$omop", {})
+    if isinstance(vocab_config, list):
+        vocab_sources = set(vocab_config)
+    elif isinstance(vocab_config, dict):
+        vocab_sources = set(vocab_config.get("sources", []))
+    else:
+        vocab_sources = set()
+
+    for section_key in ("tables", "canonical_events"):
+        for name, tc in config.get(section_key, {}).items():
+            code_val = tc.get("code", "")
+            if isinstance(code_val, str) and "$omop.resolve" in code_val:
+                if "concept_relationship" not in vocab_sources:
+                    errors.append(
+                        f"{section_key.rstrip('s')} '{name}': '$omop.resolve' requires "
+                        f"'concept_relationship' in vocabulary.$omop.sources"
+                    )
+
     return errors
 
 

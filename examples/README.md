@@ -217,7 +217,14 @@ The reference table is loaded once at pipeline startup and reused across all fil
 
 Some OMOP datasets include non-standard concepts — both site-specific custom concepts (e.g., Stanford's `STANFORD_MEAS`, `STANFORD_PROC` vocabularies) and standard vocabulary concepts that aren't marked as standard (e.g., ICD10CM codes). These concepts often have "Maps to" relationships in the OMOP `concept_relationship` table that resolve to standard concepts (SNOMED, LOINC, RxNorm, etc.).
 
-By default, the `$omop:` operator only uses the `concept` table for lookups. To also resolve custom source concepts through `concept_relationship` and restrict output to standard concepts, configure the `vocabulary` key:
+### Explicit Operations: `$omop.lookup` and `$omop.resolve`
+
+The ETL provides two explicit vocabulary operations:
+
+- **`$omop.lookup:@field`** — direct concept table join. Returns `vocabulary_id/concept_code` for the given concept ID. Never consults `concept_relationship`.
+- **`$omop.resolve:@field`** — resolves through `concept_relationship` "Maps to" chains to reach a standard concept. Returns null if no mapping exists.
+
+These can be combined with `||` fallback:
 
 ```json
 {
@@ -230,12 +237,18 @@ By default, the `$omop:` operator only uses the `concept` table for lookups. To 
     "tables": {
         "measurement": {
             "time_start": "@measurement_datetime",
-            "code": "$omop:@measurement_concept_id",
+            "code": "$omop.resolve:@measurement_source_concept_id || $omop.lookup:@measurement_concept_id",
             "numeric_value": "@value_as_number"
         }
     }
 }
 ```
+
+This reads: "resolve the source concept through 'Maps to' mappings. If that fails (source = 0 or no mapping), fall back to looking up the standard concept_id directly."
+
+### Legacy `$omop:` Syntax
+
+The `$omop:` prefix (without `.lookup` or `.resolve`) continues to work as a backward-compatible alias for `$omop.lookup:`. When `concept_relationship` is in `vocabulary.sources`, `$omop:` also triggers implicit relationship resolution as a fallback — but a deprecation warning is logged. New configs should use `$omop.lookup:` and `$omop.resolve:` explicitly.
 
 The `vocabulary.$omop` config accepts either a shorthand list (`["concept"]`) or an object with:
 
@@ -244,20 +257,11 @@ The `vocabulary.$omop` config accepts either a shorthand list (`["concept"]`) or
 | `sources` | list | `["concept"]` | OMOP tables used for resolution |
 | `standard_only` | bool or list | `false` | Filter concepts by `standard_concept` value. `true` = `["S"]`, `["S", "C"]` = Standard + Classification |
 
-When `"concept_relationship"` is included, the ETL will:
-
-1. Load the `concept_relationship` table and filter to `relationship_id = "Maps to"` with non-self-referencing pairs (concept_id_1 ≠ concept_id_2)
-2. For any `$omop:@*_concept_id` lookup, **auto-detect** the companion `*_source_concept_id` column in the same table (e.g., `observation_concept_id` → `observation_source_concept_id`)
-3. Try the primary concept lookup first; if the concept is not found (or doesn't match `standard_only` values), walk the companion source concept ID through the "Maps to" chain
-4. If a standard target concept exists, use the resolved target's code; otherwise the row is dropped (null code)
-
-This auto-detection means you write `"code": "$omop:@observation_concept_id"` and the ETL automatically tries `observation_source_concept_id` for relationship resolution — no fallback syntax needed.
-
-This is strictly additive — concepts that already resolve to standard codes through the `concept` table are unaffected. Relationship resolution only kicks in as a fallback when the primary concept lookup fails or produces a non-standard code (e.g., resolving `ICD10CM/E11.9` to `SNOMED/201826` or `STANFORD_MEAS/GLUCOSE` to `SNOMED/166900001`).
+`$omop.resolve:` requires `concept_relationship` in `vocabulary.$omop.sources`. The config validator will reject configs that use `$omop.resolve:` without it.
 
 | `vocabulary.$omop` config | Behavior |
 |--------------------------|----------|
 | `["concept"]` (default when omitted) | Direct concept table lookup only, all concepts |
 | `{"sources": ["concept"], "standard_only": true}` | Direct lookup, standard concepts (`S`) only |
 | `{"sources": ["concept"], "standard_only": ["S", "C"]}` | Direct lookup, standard + classification concepts |
-| `{"sources": ["concept", "concept_relationship"], "standard_only": ["S", "C"]}` | Standard + classification concepts + "Maps to" resolution |
+| `{"sources": ["concept", "concept_relationship"], "standard_only": ["S", "C"]}` | Standard + classification concepts + "Maps to" resolution via `$omop.resolve` |

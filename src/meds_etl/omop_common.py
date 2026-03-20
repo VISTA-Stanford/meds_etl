@@ -1094,6 +1094,8 @@ def transform_to_meds_unsorted(
     concept_join_field = "code"
     code_is_fixed = False
     _single_join_is_standard_anchor = False
+    _resolve_only_single = False
+    concept_config = None
 
     if fixed_code:
         code_is_fixed = True
@@ -1155,6 +1157,9 @@ def transform_to_meds_unsorted(
                 source_concept_id_field = concept_config.get("source_concept_id_field")
                 fallback_concept_id = concept_config.get("fallback_concept_id")
 
+                concept_id_op = concept_config.get("_concept_id_field_operation")
+                source_concept_id_op = concept_config.get("_source_concept_id_field_operation")
+
                 if concept_df is None or len(concept_df) == 0:
                     raise ValueError("concept_id mapping requested but concept_df not provided")
 
@@ -1210,11 +1215,15 @@ def transform_to_meds_unsorted(
                     else:
                         base_exprs.append(col_expr.alias("concept_id"))
 
-                    # Auto-detect companion source_concept_id column for
-                    # relationship resolution.  OMOP convention:
-                    #   observation_concept_id → observation_source_concept_id
-                    #   condition_concept_id  → condition_source_concept_id
-                    if relationship_map_df is not None:
+                    if concept_id_op == "resolve":
+                        base_exprs.append(
+                            pl.col(concept_id_field).cast(pl.Int64).alias("_source_concept_id_for_resolution")
+                        )
+                    elif concept_id_op != "lookup" and relationship_map_df is not None:
+                        # Auto-detect companion source_concept_id column for
+                        # relationship resolution.  OMOP convention:
+                        #   observation_concept_id → observation_source_concept_id
+                        #   condition_concept_id  → condition_source_concept_id
                         companion = concept_id_field.replace("_concept_id", "_source_concept_id")
                         if companion != concept_id_field and companion in df.columns:
                             base_exprs.append(
@@ -1223,10 +1232,20 @@ def transform_to_meds_unsorted(
                 else:
                     base_exprs.append(pl.lit(fallback_concept_id).cast(pl.Int64).alias("concept_id"))
 
-                code_candidates.append(concept_join_alias)
+                # For resolve-only single-field, the concept table join result is
+                # not a code candidate — only relationship resolution provides the code.
+                _resolve_only_single = False
+                if source_concept_id_field and not concept_id_field and source_concept_id_op == "resolve":
+                    _resolve_only_single = True
+                elif concept_id_field and not source_concept_id_field and concept_id_op == "resolve":
+                    _resolve_only_single = True
+
+                if not _resolve_only_single:
+                    code_candidates.append(concept_join_alias)
 
                 # Track source_concept_id separately for relationship resolution
-                if relationship_map_df is not None and source_concept_id_field:
+                # (skip when explicit "lookup" — no relationship resolution wanted)
+                if relationship_map_df is not None and source_concept_id_field and source_concept_id_op != "lookup":
                     if not (source_concept_id_field and concept_id_field):
                         base_exprs.append(
                             pl.col(source_concept_id_field).cast(pl.Int64).alias("_source_concept_id_for_resolution")
@@ -1251,7 +1270,7 @@ def transform_to_meds_unsorted(
 
             code_candidates.append(alias)
 
-        if not code_is_fixed and not code_candidates:
+        if not code_is_fixed and not code_candidates and not _resolve_only_single:
             raise ValueError(f"No code mappings defined for table '{table_config.get('table', 'unknown')}'.")
 
     # 4. numeric_value and text_value (with concept lookup + fallback support)
@@ -1411,14 +1430,24 @@ def transform_to_meds_unsorted(
                 )
                 _deferred_fallback_alias = fb_join_alias
 
-            # Rename _source_concept_id for relationship resolution
-            result = result.rename({"_source_concept_id": "_source_concept_id_for_resolution"})
+            # Rename _source_concept_id for relationship resolution (only when
+            # the source field operation is not an explicit "lookup")
+            source_concept_id_op = concept_config.get("_source_concept_id_field_operation")
+            if source_concept_id_op != "lookup":
+                result = result.rename({"_source_concept_id": "_source_concept_id_for_resolution"})
+            elif "_source_concept_id" in result.columns:
+                result = result.drop("_source_concept_id")
+
+            # When the source field is an explicit lookup, its raw code is a
+            # candidate (just like concept_id).  Otherwise it's suppressed.
+            if source_concept_id_op == "lookup":
+                _deferred_source_alias = source_join_alias
 
             # Replace the single code_concept_lookup candidate with ordered candidates:
             # Priority: 1) primary (concept_id), 2) relationship (inserted later)
-            # Raw source concept code is NOT added — the anchor is a standard
-            # concept_id, so we never fall back to non-standard source codes.
-            code_candidates.remove(join_alias)
+            # Raw source concept code is only added when source field is an explicit lookup.
+            if join_alias in code_candidates:
+                code_candidates.remove(join_alias)
             code_candidates.append(primary_join_alias)
 
             drop_cols = ["concept_id"]
@@ -1475,11 +1504,22 @@ def transform_to_meds_unsorted(
         result = result.drop("_source_concept_id_for_resolution")
         if "source_concept_id" in result.columns:
             result = result.drop("source_concept_id")
-        # Append as fallback — relationship resolution only kicks in when the
-        # concept table lookup didn't produce a code (e.g., concept_id was 0
-        # and source_concept_id is a custom concept with a "Maps to" chain)
         if rel_alias in result.columns:
             code_candidates.append(rel_alias)
+
+            # Deprecation warning for implicit resolution via legacy $omop: syntax
+            concept_id_op = concept_config.get("_concept_id_field_operation") if concept_config else None
+            source_concept_id_op = concept_config.get("_source_concept_id_field_operation") if concept_config else None
+            if not concept_id_op and not source_concept_id_op:
+                import warnings
+
+                warnings.warn(
+                    "$omop:@field with implicit concept_relationship resolution is deprecated. "
+                    "Use $omop.resolve:@field for explicit resolution or $omop.lookup:@field "
+                    "for direct lookup.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
 
             if (
                 concept_config.get("_source_first")
@@ -1492,13 +1532,24 @@ def transform_to_meds_unsorted(
                 code_candidates.insert(idx, rel_alias)
 
     # Add deferred source and fallback concept codes as lowest-priority fallbacks.
-    # Only used when the anchor column is a source concept (i.e., source_concept_id_field
-    # is the only field configured). When the anchor is a standard concept_id_field,
-    # we NEVER fall back to raw source codes — only standard resolutions are acceptable.
     if _deferred_source_alias is not None and _deferred_source_alias in result.columns:
         code_candidates.append(_deferred_source_alias)
     if _deferred_fallback_alias is not None and _deferred_fallback_alias in result.columns:
         code_candidates.append(_deferred_fallback_alias)
+
+    # Reorder deferred source alias for _source_first (handles lookup-lookup case
+    # where relationship resolution is skipped and the source alias is deferred)
+    if (
+        concept_config
+        and concept_config.get("_source_first")
+        and primary_join_alias is not None
+        and _deferred_source_alias is not None
+        and _deferred_source_alias in code_candidates
+        and primary_join_alias in code_candidates
+    ):
+        code_candidates.remove(_deferred_source_alias)
+        idx = code_candidates.index(primary_join_alias)
+        code_candidates.insert(idx, _deferred_source_alias)
 
     # Perform concept lookups for properties and text_value/numeric_value
     all_concept_requests = concept_value_requests + concept_property_requests

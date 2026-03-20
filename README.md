@@ -86,7 +86,7 @@ The JSON config file tells the ETL **which OMOP tables to process** and **how to
   "tables": {
     "measurement": {
       "time_start": "@measurement_datetime",
-      "code": "$omop:@measurement_concept_id",
+      "code": "$omop.lookup:@measurement_concept_id",
       "numeric_value": "@value_as_number"
     }
   }
@@ -98,7 +98,9 @@ The JSON config file tells the ETL **which OMOP tables to process** and **how to
 | Syntax | Meaning | Example |
 |--------|---------|---------|
 | `@column` | Column reference | `@measurement_datetime` |
-| `$omop:@col` | OMOP concept lookup | `$omop:@measurement_concept_id` |
+| `$omop.lookup:@col` | Direct concept table lookup | `$omop.lookup:@measurement_concept_id` |
+| `$omop.resolve:@col` | Resolve via concept_relationship "Maps to" | `$omop.resolve:@measurement_source_concept_id` |
+| `$omop:@col` | Legacy concept lookup (deprecated with implicit resolution) | `$omop:@measurement_concept_id` |
 | `$literal:value` | Explicit literal string | `$literal:measurement` |
 | `@col1 \|\| @col2` | Fallback (first non-null) | `@measurement_datetime \|\| @measurement_date` |
 | `{@col >> transform()}` | Transform pipe | `{@note_title >> regex_replace('\\s+', '-')}` |
@@ -107,7 +109,9 @@ The JSON config file tells the ETL **which OMOP tables to process** and **how to
 | `pre_join` | Enrich rows from a reference table | `[{"table": "care_site", "on": "care_site_id", "select": ["care_site_name"]}]` |
 | `vocabulary` | Concept resolution config (top-level) | `{"$omop": {"sources": [...], "standard_only": ["S", "C"]}}` |
 
-- **`$omop:` prefix** triggers a join with the OMOP `concept` table, producing codes in `vocabulary_id/concept_code` format.
+- **`$omop.lookup:`** joins to the OMOP `concept` table and returns the code string (`vocabulary_id/concept_code`). No relationship resolution.
+- **`$omop.resolve:`** resolves through `concept_relationship` "Maps to" chains to reach a standard concept. Requires `concept_relationship` in `vocabulary.$omop.sources`.
+- **`$omop:`** (legacy) is a backward-compatible alias for `$omop.lookup:`. When `concept_relationship` is in `vocabulary.sources`, it implicitly triggers relationship resolution — a deprecation warning is logged when this happens. New configs should use `$omop.lookup:` and `$omop.resolve:` explicitly.
 - **`$literal:`** must be used for literal string values in properties. Bare strings (without `@` or `$literal:`) are treated as errors.
 - **`>>`** is the preferred transform pipe operator inside `{...}` braces. (`|` is still supported for backward compatibility but `>>` avoids ambiguity with the `||` fallback operator.)
 - **Transforms:** `split(delim, index[, default])`, `regex_replace(pattern, replacement)`, `upper()`, `lower()`, `strip()`
@@ -125,18 +129,31 @@ Configs are automatically validated at load time. The validator checks:
 
 ### Source Concept Resolution
 
-For OMOP datasets with site-specific custom concepts (e.g., Stanford), configure the `vocabulary` key to have `$omop:` also walk "Maps to" chains for custom source concepts:
+For OMOP datasets with site-specific custom concepts (e.g., Stanford), use `$omop.resolve:` to walk "Maps to" chains in `concept_relationship`:
 
 ```json
-"vocabulary": {
-    "$omop": {
-        "sources": ["concept", "concept_relationship"],
-        "standard_only": ["S", "C"]
+{
+    "vocabulary": {
+        "$omop": {
+            "sources": ["concept", "concept_relationship"],
+            "standard_only": ["S", "C"]
+        }
+    },
+    "tables": {
+        "measurement": {
+            "time_start": "@measurement_datetime",
+            "code": "$omop.resolve:@measurement_source_concept_id || $omop.lookup:@measurement_concept_id",
+            "numeric_value": "@value_as_number"
+        }
     }
 }
 ```
 
-When `concept_relationship` is included, the ETL **auto-detects** the companion `*_source_concept_id` column for each `$omop:@*_concept_id` lookup (e.g., `observation_concept_id` → `observation_source_concept_id`). If the primary concept lookup fails (or is non-standard when `standard_only` is set), the companion source concept is walked through "Maps to" chains to find a standard code.
+This reads: "resolve the source concept through 'Maps to' mappings to find a standard code. If that fails (source = 0 or no mapping), fall back to a direct concept table lookup on the standard concept_id."
+
+**Operations:**
+- `$omop.lookup:@field` — direct concept table join, returns `vocabulary_id/concept_code`. Never consults `concept_relationship`.
+- `$omop.resolve:@field` — resolves through `concept_relationship` "Maps to" chains. Returns null if no mapping exists. Requires `concept_relationship` in `vocabulary.$omop.sources`.
 
 `standard_only` accepts `true` (shorthand for `["S"]`), a list like `["S", "C"]` to include Classification concepts, or `false`/omitted for no filtering. OMOP's `standard_concept` values are `"S"` (Standard), `"C"` (Classification), and null (non-standard).
 

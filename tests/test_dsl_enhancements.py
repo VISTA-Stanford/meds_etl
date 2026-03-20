@@ -1802,3 +1802,429 @@ class TestSourceFirstOrdering:
         codes = result["code"].to_list()
         # source_concept_id=0 → no relationship match → falls through to concept_id 3001
         assert codes[0] == "LOINC/2339-0"
+
+
+class TestExplicitVocabOperations:
+    """Test $omop.lookup and $omop.resolve explicit vocabulary operations."""
+
+    @pytest.fixture
+    def concept_df(self):
+        return pl.DataFrame(
+            {
+                "concept_id": [1001, 2001, 3001],
+                "code": ["SOURCE/Glucose", "SNOMED/Standard_Glucose", "LOINC/2339-0"],
+                "concept_code": ["Glucose", "Standard_Glucose", "2339-0"],
+                "concept_name": ["Source Glucose", "Standard Glucose", "Glucose"],
+                "vocabulary_id": ["SOURCE", "SNOMED", "LOINC"],
+                "domain_id": ["Measurement", "Measurement", "Measurement"],
+                "concept_class_id": ["Lab Test", "Clinical Finding", "Lab Test"],
+                "standard_concept": [None, "S", "S"],
+            }
+        )
+
+    @pytest.fixture
+    def relationship_map_df(self):
+        return pl.DataFrame(
+            {
+                "source_concept_id": pl.Series([1001], dtype=pl.Int64),
+                "resolved_code": ["SNOMED/Standard_Glucose"],
+            }
+        )
+
+    @pytest.fixture
+    def meds_schema(self):
+        return {
+            "subject_id": pl.Int64,
+            "time": pl.Datetime("us"),
+            "code": pl.Utf8,
+            "numeric_value": pl.Float32,
+            "text_value": pl.Utf8,
+            "end": pl.Datetime("us"),
+        }
+
+    # --- Compiler tests ---
+
+    def test_compile_omop_lookup_single(self):
+        """$omop.lookup:@field compiles with _operation=lookup."""
+        config = {
+            "tables": {
+                "measurement": {
+                    "time_start": "@measurement_datetime",
+                    "code": "$omop.lookup:@measurement_concept_id",
+                }
+            }
+        }
+        compiled = compile_config(config)
+        cid = compiled["tables"]["measurement"]["code_mappings"]["concept_id"]
+        assert cid["concept_id_field"] == "measurement_concept_id"
+        assert cid["_concept_id_field_operation"] == "lookup"
+
+    def test_compile_omop_resolve_single(self):
+        """$omop.resolve:@field compiles with _operation=resolve."""
+        config = {
+            "tables": {
+                "measurement": {
+                    "time_start": "@measurement_datetime",
+                    "code": "$omop.resolve:@measurement_source_concept_id",
+                }
+            }
+        }
+        compiled = compile_config(config)
+        cid = compiled["tables"]["measurement"]["code_mappings"]["concept_id"]
+        assert cid["source_concept_id_field"] == "measurement_source_concept_id"
+        assert cid["_source_concept_id_field_operation"] == "resolve"
+
+    def test_compile_mixed_chain(self):
+        """$omop.resolve || $omop.lookup compiles with per-field operations."""
+        config = {
+            "tables": {
+                "measurement": {
+                    "time_start": "@measurement_datetime",
+                    "code": "$omop.resolve:@measurement_source_concept_id || $omop.lookup:@measurement_concept_id",
+                }
+            }
+        }
+        compiled = compile_config(config)
+        cid = compiled["tables"]["measurement"]["code_mappings"]["concept_id"]
+        assert cid["source_concept_id_field"] == "measurement_source_concept_id"
+        assert cid["_source_concept_id_field_operation"] == "resolve"
+        assert cid["concept_id_field"] == "measurement_concept_id"
+        assert cid["_concept_id_field_operation"] == "lookup"
+        assert cid.get("_source_first") is True
+
+    def test_compile_legacy_no_operation(self):
+        """Legacy $omop:@field compiles without _operation annotations."""
+        config = {
+            "tables": {
+                "measurement": {
+                    "time_start": "@measurement_datetime",
+                    "code": "$omop:@measurement_concept_id",
+                }
+            }
+        }
+        compiled = compile_config(config)
+        cid = compiled["tables"]["measurement"]["code_mappings"]["concept_id"]
+        assert cid["concept_id_field"] == "measurement_concept_id"
+        assert "_concept_id_field_operation" not in cid
+
+    # --- Runtime tests: $omop.lookup ---
+
+    def test_lookup_returns_concept_table_code(self, concept_df, relationship_map_df, meds_schema):
+        """$omop.lookup returns the concept table code, no relationship resolution."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1],
+                "measurement_datetime": [datetime.datetime(2024, 1, 1)],
+                "measurement_source_concept_id": pl.Series([1001], dtype=pl.Int64),
+            }
+        )
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "source_concept_id_field": "measurement_source_concept_id",
+                    "_source_concept_id_field_operation": "lookup",
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            relationship_map_df=relationship_map_df,
+        )
+        codes = result["code"].to_list()
+        # lookup returns the raw concept table entry, NOT the relationship-resolved code
+        assert codes[0] == "SOURCE/Glucose"
+
+    def test_lookup_ignores_relationship_map(self, concept_df, relationship_map_df, meds_schema):
+        """$omop.lookup never triggers concept_relationship resolution."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1],
+                "measurement_datetime": [datetime.datetime(2024, 1, 1)],
+                "measurement_concept_id": [3001],
+                "measurement_source_concept_id": pl.Series([1001], dtype=pl.Int64),
+            }
+        )
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id",
+                    "_concept_id_field_operation": "lookup",
+                    "source_concept_id_field": "measurement_source_concept_id",
+                    "_source_concept_id_field_operation": "lookup",
+                    "_source_first": True,
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            relationship_map_df=relationship_map_df,
+        )
+        codes = result["code"].to_list()
+        # Both are lookups, source is first → raw source concept code
+        assert codes[0] == "SOURCE/Glucose"
+
+    # --- Runtime tests: $omop.resolve ---
+
+    def test_resolve_returns_relationship_code(self, concept_df, relationship_map_df, meds_schema):
+        """$omop.resolve returns the relationship-resolved code."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1],
+                "measurement_datetime": [datetime.datetime(2024, 1, 1)],
+                "measurement_source_concept_id": pl.Series([1001], dtype=pl.Int64),
+            }
+        )
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "source_concept_id_field": "measurement_source_concept_id",
+                    "_source_concept_id_field_operation": "resolve",
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            relationship_map_df=relationship_map_df,
+        )
+        codes = result["code"].to_list()
+        assert codes[0] == "SNOMED/Standard_Glucose"
+
+    def test_resolve_returns_null_when_no_mapping(self, concept_df, relationship_map_df, meds_schema):
+        """$omop.resolve returns null when no 'Maps to' exists (row dropped)."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1],
+                "measurement_datetime": [datetime.datetime(2024, 1, 1)],
+                "measurement_source_concept_id": pl.Series([3001], dtype=pl.Int64),
+            }
+        )
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "source_concept_id_field": "measurement_source_concept_id",
+                    "_source_concept_id_field_operation": "resolve",
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            relationship_map_df=relationship_map_df,
+        )
+        # concept 3001 has no "Maps to" → null code → row filtered
+        assert len(result) == 0
+
+    # --- Runtime tests: mixed || chain ---
+
+    def test_resolve_then_lookup_fallback(self, concept_df, relationship_map_df, meds_schema):
+        """$omop.resolve:@source || $omop.lookup:@concept uses resolve first, falls back to lookup."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1, 2],
+                "measurement_datetime": [
+                    datetime.datetime(2024, 1, 1),
+                    datetime.datetime(2024, 1, 2),
+                ],
+                "measurement_concept_id": [3001, 3001],
+                "measurement_source_concept_id": pl.Series([1001, 0], dtype=pl.Int64),
+            }
+        )
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "source_concept_id_field": "measurement_source_concept_id",
+                    "_source_concept_id_field_operation": "resolve",
+                    "concept_id_field": "measurement_concept_id",
+                    "_concept_id_field_operation": "lookup",
+                    "_source_first": True,
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            relationship_map_df=relationship_map_df,
+        )
+        codes = result.sort("subject_id")["code"].to_list()
+        # Row 1: source 1001 resolves → SNOMED/Standard_Glucose
+        assert codes[0] == "SNOMED/Standard_Glucose"
+        # Row 2: source 0 → no resolve → falls back to lookup concept_id 3001 → LOINC/2339-0
+        assert codes[1] == "LOINC/2339-0"
+
+    def test_lookup_then_lookup_chain(self, concept_df, meds_schema):
+        """$omop.lookup:@source || $omop.lookup:@concept respects left-to-right order."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1, 2],
+                "measurement_datetime": [
+                    datetime.datetime(2024, 1, 1),
+                    datetime.datetime(2024, 1, 2),
+                ],
+                "measurement_concept_id": [3001, 3001],
+                "measurement_source_concept_id": pl.Series([1001, 0], dtype=pl.Int64),
+            }
+        )
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "source_concept_id_field": "measurement_source_concept_id",
+                    "_source_concept_id_field_operation": "lookup",
+                    "concept_id_field": "measurement_concept_id",
+                    "_concept_id_field_operation": "lookup",
+                    "_source_first": True,
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+        result = transform_to_meds_unsorted(
+            df=df,
+            table_config=table_config,
+            primary_key="person_id",
+            meds_schema=meds_schema,
+            concept_df=concept_df,
+            relationship_map_df=None,
+        )
+        codes = result.sort("subject_id")["code"].to_list()
+        # Row 1: source 1001 → SOURCE/Glucose (raw lookup, source first)
+        assert codes[0] == "SOURCE/Glucose"
+        # Row 2: source 0 → null → falls through to concept_id 3001 → LOINC/2339-0
+        assert codes[1] == "LOINC/2339-0"
+
+    # --- Config validation tests ---
+
+    def test_schema_rejects_resolve_without_concept_relationship(self):
+        """$omop.resolve without concept_relationship in sources fails validation."""
+        config = {
+            "vocabulary": {"$omop": {"sources": ["concept"]}},
+            "tables": {
+                "measurement": {
+                    "time_start": "@measurement_datetime",
+                    "code": "$omop.resolve:@measurement_source_concept_id",
+                }
+            },
+        }
+        errors = validate_config_schema(config)
+        assert any("$omop.resolve" in e and "concept_relationship" in e for e in errors)
+
+    def test_schema_accepts_resolve_with_concept_relationship(self):
+        """$omop.resolve with concept_relationship in sources passes validation."""
+        config = {
+            "vocabulary": {"$omop": {"sources": ["concept", "concept_relationship"]}},
+            "tables": {
+                "measurement": {
+                    "time_start": "@measurement_datetime",
+                    "code": "$omop.resolve:@measurement_source_concept_id",
+                }
+            },
+        }
+        errors = validate_config_schema(config)
+        assert not any("$omop.resolve" in e for e in errors)
+
+    def test_schema_accepts_lookup_without_concept_relationship(self):
+        """$omop.lookup works without concept_relationship in sources."""
+        config = {
+            "vocabulary": {"$omop": {"sources": ["concept"]}},
+            "tables": {
+                "measurement": {
+                    "time_start": "@measurement_datetime",
+                    "code": "$omop.lookup:@measurement_concept_id",
+                }
+            },
+        }
+        errors = validate_config_schema(config)
+        assert not any("$omop.resolve" in e for e in errors)
+
+    # --- Backward compatibility ---
+
+    def test_legacy_omop_still_works(self, concept_df, relationship_map_df, meds_schema):
+        """Legacy $omop:@field syntax continues to work identically."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1],
+                "measurement_datetime": [datetime.datetime(2024, 1, 1)],
+                "measurement_concept_id": [3001],
+                "measurement_source_concept_id": pl.Series([1001], dtype=pl.Int64),
+            }
+        )
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id",
+                    "source_concept_id_field": "measurement_source_concept_id",
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            result = transform_to_meds_unsorted(
+                df=df,
+                table_config=table_config,
+                primary_key="person_id",
+                meds_schema=meds_schema,
+                concept_df=concept_df,
+                relationship_map_df=relationship_map_df,
+            )
+        codes = result["code"].to_list()
+        # Legacy: concept_id 3001 → LOINC/2339-0 takes priority (concept first)
+        assert codes[0] == "LOINC/2339-0"
+
+    def test_legacy_omop_emits_deprecation_warning(self, concept_df, relationship_map_df, meds_schema):
+        """Legacy $omop:@field emits DeprecationWarning when implicit resolution fires."""
+        df = pl.DataFrame(
+            {
+                "person_id": [1],
+                "measurement_datetime": [datetime.datetime(2024, 1, 1)],
+                "measurement_concept_id": [0],
+                "measurement_source_concept_id": pl.Series([1001], dtype=pl.Int64),
+            }
+        )
+        table_config = {
+            "code_mappings": {
+                "concept_id": {
+                    "concept_id_field": "measurement_concept_id",
+                    "source_concept_id_field": "measurement_source_concept_id",
+                }
+            },
+            "time_start": "measurement_datetime",
+        }
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            transform_to_meds_unsorted(
+                df=df,
+                table_config=table_config,
+                primary_key="person_id",
+                meds_schema=meds_schema,
+                concept_df=concept_df,
+                relationship_map_df=relationship_map_df,
+            )
+        deprecations = [x for x in w if issubclass(x.category, DeprecationWarning)]
+        assert len(deprecations) >= 1
+        assert "$omop.resolve" in str(deprecations[0].message)
