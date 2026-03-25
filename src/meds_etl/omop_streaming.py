@@ -17,7 +17,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 import polars as pl
 from tqdm import tqdm
@@ -26,6 +26,7 @@ from tqdm import tqdm
 # This maintains backwards compatibility after moving code to omop_common.
 from meds_etl.omop_common import (  # noqa: F401
     apply_transforms,
+    build_code_metadata,
     build_concept_map,
     build_relationship_resolution_map,
     build_template_expression,
@@ -483,14 +484,13 @@ def run_omop_to_meds_streaming(
     concept_lookup_needed = config_requires_concept_lookup(config)
 
     concept_df: Optional[pl.DataFrame] = None
-    code_metadata: Dict[int, Any] = {}
 
     if concept_lookup_needed:
         print(f"\n{'=' * 70}")
         print("BUILDING CONCEPT MAP")
         print(f"{'=' * 70}")
 
-        concept_df, code_metadata = build_concept_map(omop_dir, verbose=verbose)
+        concept_df, _unused = build_concept_map(omop_dir, verbose=verbose)
 
         if len(concept_df) == 0:
             print("\nERROR: concept_id mappings requested but concept table not found!")
@@ -539,9 +539,12 @@ def run_omop_to_meds_streaming(
     with open(metadata_dir / "dataset.json", "w") as f:
         json.dump(dataset_metadata, f, indent=2)
 
-    if code_metadata:
-        table = pa.Table.from_pylist(list(code_metadata.values()), meds.code_metadata_schema())
-        pq.write_table(table, metadata_dir / "codes.parquet")
+    if concept_df is not None and len(concept_df) > 0:
+        print("\n  Building code metadata...")
+        code_metadata_list = build_code_metadata(concept_df, omop_dir, verbose=verbose)
+        if code_metadata_list:
+            table = pa.Table.from_pylist(code_metadata_list, meds.code_metadata_schema())
+            pq.write_table(table, metadata_dir / "codes.parquet")
 
     final_metadata_dir = output_dir / "metadata"
     if final_metadata_dir.exists():
