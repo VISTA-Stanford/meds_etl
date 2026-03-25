@@ -529,19 +529,13 @@ def extract_metadata(path_to_src_omop_dir: str, path_to_decompressed_dir: str, v
             concept_id_map |= dict(zip(result["concept_id"], result["code"], strict=False))
             concept_name_map |= dict(zip(result["concept_id"], result["name"], strict=False))
 
-            # Assuming custom concepts have concept_id > 2000000000 we create a
-            # record for them in `code_metadata` with no parent codes. Such a
-            # custom code could be eg `STANFORD_RACE/Black or African American`
-            # with `concept_id` 2000039197
-            custom_concepts = (
-                concept.filter(concept_id > CUSTOMER_CONCEPT_ID_START)
-                .select(concept_id=concept_id, code=code, description=pl.col("concept_name"))
-                .to_dict()
-            )
-            for i in range(len(custom_concepts["code"])):
-                code_metadata[custom_concepts["code"][i]] = {
-                    "code": custom_concepts["code"][i],
-                    "description": custom_concepts["description"][i],
+            all_concepts = concept.select(
+                concept_id=concept_id, code=code, description=pl.col("concept_name")
+            ).to_dict()
+            for i in range(len(all_concepts["code"])):
+                code_metadata[all_concepts["code"][i]] = {
+                    "code": all_concepts["code"][i],
+                    "description": all_concepts["description"][i],
                     "parent_codes": [],
                 }
 

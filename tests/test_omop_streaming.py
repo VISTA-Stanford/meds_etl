@@ -652,9 +652,14 @@ def test_build_concept_map_basic():
         assert "LOINC/8867-4" in codes
         assert "Custom/C001" in codes
 
-        # Check metadata for custom concepts (concept_id > 2B)
-        assert len(code_metadata) == 1
+        # All concepts should have metadata with descriptions
+        assert len(code_metadata) == 3
         assert "Custom/C001" in code_metadata
+        assert "LOINC/8310-5" in code_metadata
+        assert "LOINC/8867-4" in code_metadata
+        assert code_metadata["LOINC/8310-5"]["description"] == "Body temperature"
+        assert code_metadata["LOINC/8867-4"]["description"] == "Heart rate"
+        assert code_metadata["Custom/C001"]["description"] == "Custom concept"
 
 
 def test_build_concept_map_no_files():

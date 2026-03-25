@@ -442,7 +442,8 @@ def build_concept_map(omop_dir: Path, verbose: bool = False) -> Tuple[pl.DataFra
 
     Returns:
         concept_df: Polars DataFrame with concept columns
-        code_metadata: Dict[code -> metadata] for custom concepts
+        code_metadata: Dict[code -> metadata] for all concepts (description from concept_name,
+            parent_codes populated for custom concepts via concept_relationship "Maps to")
     """
     if verbose:
         print("\n" + "=" * 70)
@@ -494,8 +495,7 @@ def build_concept_map(omop_dir: Path, verbose: bool = False) -> Tuple[pl.DataFra
 
         concept_dfs.append(concept_df)
 
-        custom_df = concept_df.filter(pl.col("concept_id") > 2_000_000_000)
-        for row in custom_df.iter_rows(named=True):
+        for row in concept_df.iter_rows(named=True):
             code_metadata[row["code"]] = {
                 "code": row["code"],
                 "description": row["concept_name"],
@@ -540,9 +540,11 @@ def build_concept_map(omop_dir: Path, verbose: bool = False) -> Tuple[pl.DataFra
                     if code1 in code_metadata:
                         code_metadata[code1]["parent_codes"].append(code2)
 
+    custom_count = sum(1 for v in code_metadata.values() if v["parent_codes"])
     if verbose:
         print(f"\n  Total concepts: {len(concept_df_combined):,}")
-        print(f"  Custom concepts: {len(code_metadata):,}")
+        print(f"  Concepts with descriptions in code_metadata: {len(code_metadata):,}")
+        print(f"  Custom concepts with parent_codes: {custom_count:,}")
 
     return concept_df_combined, code_metadata
 
