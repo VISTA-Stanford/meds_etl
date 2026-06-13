@@ -169,11 +169,17 @@ uv run pytest
 ## Citation
 
 ```bibtex
-@software{meds_etl,
-  title = {MEDS ETL: Scalable pipelines for OMOP to MEDS conversion},
-  author = {{MEDS Development Team}},
-  year = {2024},
-  url = {https://github.com/VISTA-Stanford/meds_etl}
+@article{mcdermott2026meds,
+  title   = {MEDS --- An Emerging Data Standard and Ecosystem for Health AI Research},
+  author  = {McDermott, Matthew B. A. and Steinberg, Ethan and Fries, Jason A. and van de Water, Robin P. and Pang, Chao and Rockenschaub, Patrick and Renc, Pawel and Oh, Jungwoo and Stankevi{\v{c}}i{\=u}t{\.e}, Kamil{\.e} and Xu, Justin and Pollard, Tom J. and Oufattole, Nassim and Wornow, Michael and Bergamaschi, Teya S. and Jeong, Hyewon and Lee, Simon A. and Jeanselme, Vincent and Klein, Kiril V. and Odgaard, Mikkel and Montgomery, Maria E. and Sitek, Arkadiusz and Nielsen, Mads and Chiang, Jeffrey N. and Dagan, Noa and Kohane, Isaac and Joshi, Shalmali and Choi, Edward and Shah, Nigam H.},
+  journal = {NEJM AI},
+  year    = {2026},
+  volume  = {3},
+  number  = {6},
+  pages   = {AIra2501253},
+  doi     = {10.1056/AIra2501253},
+  url     = {https://doi.org/10.1056/AIra2501253},
+  month   = may
 }
 ```
 
