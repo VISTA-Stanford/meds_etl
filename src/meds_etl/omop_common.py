@@ -442,15 +442,13 @@ def build_concept_map(omop_dir: Path, verbose: bool = False) -> Tuple[pl.DataFra
 
     Returns:
         concept_df: Polars DataFrame with concept columns
-        code_metadata: Dict[code -> metadata] for all concepts (description from concept_name,
-            parent_codes populated for custom concepts via concept_relationship "Maps to")
+        code_metadata: Empty dict (metadata is now built separately via build_code_metadata)
     """
     if verbose:
         print("\n" + "=" * 70)
         print("BUILDING CONCEPT MAP")
         print("=" * 70)
 
-    code_metadata: Dict[str, Any] = {}
     concept_dfs = []
 
     concept_dir = omop_dir / "concept"
@@ -495,14 +493,43 @@ def build_concept_map(omop_dir: Path, verbose: bool = False) -> Tuple[pl.DataFra
 
         concept_dfs.append(concept_df)
 
-        for row in concept_df.iter_rows(named=True):
-            code_metadata[row["code"]] = {
-                "code": row["code"],
-                "description": row["concept_name"],
-                "parent_codes": [],
-            }
-
     concept_df_combined = pl.concat(concept_dfs, rechunk=True)
+
+    if verbose:
+        print(f"\n  Total concepts: {len(concept_df_combined):,}")
+
+    return concept_df_combined, {}
+
+
+def build_code_metadata(
+    concept_df: pl.DataFrame,
+    omop_dir: Path,
+    verbose: bool = False,
+) -> List[Dict[str, Any]]:
+    """Build MEDS code_metadata for all concepts in concept_df.
+
+    Generates a description for every concept and populates parent_codes
+    from "Maps to" relationships in concept_relationship.
+
+    Args:
+        concept_df: Pre-filtered concept DataFrame (only concepts used in the output).
+        omop_dir: Path to the OMOP data directory.
+        verbose: Print progress information.
+
+    Returns:
+        List of dicts with keys: code, description, parent_codes.
+    """
+    if concept_df is None or len(concept_df) == 0:
+        return []
+
+    code_metadata: Dict[str, Dict[str, Any]] = {}
+
+    for row in concept_df.iter_rows(named=True):
+        code_metadata[row["code"]] = {
+            "code": row["code"],
+            "description": row["concept_name"],
+            "parent_codes": [],
+        }
 
     rel_dir = omop_dir / "concept_relationship"
     rel_files: List[Path] = []
@@ -512,19 +539,18 @@ def build_concept_map(omop_dir: Path, verbose: bool = False) -> Tuple[pl.DataFra
         rel_files = [omop_dir / "concept_relationship.parquet"]
 
     if rel_files:
-        concept_id_to_code = dict(
-            zip(concept_df_combined["concept_id"].to_list(), concept_df_combined["code"].to_list(), strict=False)
-        )
+        used_concept_ids = set(concept_df["concept_id"].to_list())
+        concept_id_to_code = dict(zip(concept_df["concept_id"].to_list(), concept_df["code"].to_list(), strict=False))
 
-        for rel_file in tqdm(rel_files, desc="Loading concept relationships"):
+        for rel_file in tqdm(rel_files, desc="Building code metadata (parent_codes)", disable=not verbose):
             df = pl.read_parquet(rel_file)
             df = df.rename({col: col.lower() for col in df.columns})
 
-            custom_rels = (
+            rels = (
                 df.filter(
-                    (pl.col("concept_id_1") > 2_000_000_000)
-                    & (pl.col("relationship_id") == "Maps to")
+                    (pl.col("relationship_id") == "Maps to")
                     & (pl.col("concept_id_1") != pl.col("concept_id_2"))
+                    & pl.col("concept_id_1").is_in(used_concept_ids)
                 )
                 .select(
                     concept_id_1=pl.col("concept_id_1").cast(pl.Int64),
@@ -533,20 +559,18 @@ def build_concept_map(omop_dir: Path, verbose: bool = False) -> Tuple[pl.DataFra
                 .to_dict(as_series=False)
             )
 
-            for cid1, cid2 in zip(custom_rels["concept_id_1"], custom_rels["concept_id_2"], strict=False):
+            for cid1, cid2 in zip(rels["concept_id_1"], rels["concept_id_2"], strict=False):
                 if cid1 in concept_id_to_code and cid2 in concept_id_to_code:
                     code1 = concept_id_to_code[cid1]
                     code2 = concept_id_to_code[cid2]
                     if code1 in code_metadata:
                         code_metadata[code1]["parent_codes"].append(code2)
 
-    custom_count = sum(1 for v in code_metadata.values() if v["parent_codes"])
     if verbose:
-        print(f"\n  Total concepts: {len(concept_df_combined):,}")
-        print(f"  Concepts with descriptions in code_metadata: {len(code_metadata):,}")
-        print(f"  Custom concepts with parent_codes: {custom_count:,}")
+        with_parents = sum(1 for m in code_metadata.values() if m["parent_codes"])
+        print(f"  ✅ Code metadata: {len(code_metadata):,} codes, {with_parents:,} with parent_codes")
 
-    return concept_df_combined, code_metadata
+    return list(code_metadata.values())
 
 
 def build_relationship_resolution_map(

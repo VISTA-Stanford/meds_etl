@@ -14,6 +14,7 @@ import pytest
 from meds_etl.config_compiler import compile_config
 from meds_etl.omop_streaming import (
     apply_transforms,
+    build_code_metadata,
     build_concept_map,
     config_type_to_polars,
     find_omop_table_files,
@@ -652,14 +653,8 @@ def test_build_concept_map_basic():
         assert "LOINC/8867-4" in codes
         assert "Custom/C001" in codes
 
-        # All concepts should have metadata with descriptions
-        assert len(code_metadata) == 3
-        assert "Custom/C001" in code_metadata
-        assert "LOINC/8310-5" in code_metadata
-        assert "LOINC/8867-4" in code_metadata
-        assert code_metadata["LOINC/8310-5"]["description"] == "Body temperature"
-        assert code_metadata["LOINC/8867-4"]["description"] == "Heart rate"
-        assert code_metadata["Custom/C001"]["description"] == "Custom concept"
+        # Metadata is now built separately via build_code_metadata
+        assert len(code_metadata) == 0
 
 
 def test_build_concept_map_no_files():
@@ -674,6 +669,85 @@ def test_build_concept_map_no_files():
         assert "concept_id" in result_df.columns
         assert "code" in result_df.columns
         assert len(code_metadata) == 0
+
+
+def test_build_code_metadata_all_concepts():
+    """Test that build_code_metadata emits metadata for ALL concepts (standard + custom)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+
+        concept_df = pl.DataFrame(
+            {
+                "concept_id": [3004410, 3000963, 2000000001],
+                "code": ["LOINC/8310-5", "LOINC/8867-4", "Custom/C001"],
+                "concept_code": ["8310-5", "8867-4", "C001"],
+                "concept_name": ["Body temperature", "Heart rate", "Custom concept"],
+                "vocabulary_id": ["LOINC", "LOINC", "Custom"],
+                "domain_id": ["Measurement", "Measurement", "Measurement"],
+                "concept_class_id": ["Clinical Observation", "Clinical Observation", "Clinical Observation"],
+            }
+        )
+
+        metadata = build_code_metadata(concept_df, tmpdir_path, verbose=False)
+
+        assert len(metadata) == 3
+        codes = {m["code"] for m in metadata}
+        assert "LOINC/8310-5" in codes
+        assert "LOINC/8867-4" in codes
+        assert "Custom/C001" in codes
+
+        by_code = {m["code"]: m for m in metadata}
+        assert by_code["LOINC/8310-5"]["description"] == "Body temperature"
+        assert by_code["Custom/C001"]["description"] == "Custom concept"
+
+
+def test_build_code_metadata_with_parent_codes():
+    """Test that build_code_metadata populates parent_codes from concept_relationship."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+
+        concept_df = pl.DataFrame(
+            {
+                "concept_id": [2000000001, 3004410, 44818790],
+                "code": ["Custom/C001", "LOINC/8310-5", "ICD10CM/R50.9"],
+                "concept_code": ["C001", "8310-5", "R50.9"],
+                "concept_name": ["Custom concept", "Body temperature", "Fever unspecified"],
+                "vocabulary_id": ["Custom", "LOINC", "ICD10CM"],
+                "domain_id": ["Measurement", "Measurement", "Condition"],
+                "concept_class_id": ["Clinical Observation", "Clinical Observation", "ICD10 code"],
+            }
+        )
+
+        # Custom concept maps to a standard concept
+        rel_df = pl.DataFrame(
+            {
+                "concept_id_1": [2000000001, 44818790],
+                "concept_id_2": [3004410, 3004410],
+                "relationship_id": ["Maps to", "Maps to"],
+            }
+        )
+
+        rel_dir = tmpdir_path / "concept_relationship"
+        rel_dir.mkdir()
+        rel_df.write_parquet(rel_dir / "concept_relationship.parquet")
+
+        metadata = build_code_metadata(concept_df, tmpdir_path, verbose=False)
+
+        by_code = {m["code"]: m for m in metadata}
+        assert "LOINC/8310-5" in by_code["Custom/C001"]["parent_codes"]
+        assert "LOINC/8310-5" in by_code["ICD10CM/R50.9"]["parent_codes"]
+        # Standard concept should have no parent_codes (self-maps are excluded)
+        assert by_code["LOINC/8310-5"]["parent_codes"] == []
+
+
+def test_build_code_metadata_empty_concept_df():
+    """Test that build_code_metadata returns empty list for empty concept_df."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        metadata = build_code_metadata(pl.DataFrame(), Path(tmpdir), verbose=False)
+        assert metadata == []
+
+        metadata_none = build_code_metadata(None, Path(tmpdir), verbose=False)
+        assert metadata_none == []
 
 
 # ============================================================================

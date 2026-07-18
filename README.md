@@ -13,7 +13,18 @@
 
 <br>
 
-High-performance ETL for transforming **OMOP CDM** and **MIMIC-IV** into [MEDS](https://github.com/Medical-Event-Data-Standard/meds) format.
+High-performance ETL for transforming **OMOP CDM** into [MEDS](https://github.com/Medical-Event-Data-Standard/meds) format.
+
+## Tested Data Formats
+
+This project is currently tested only with **OMOP CDM v5.3 and later**.
+
+- [x] **OMOP CDM v5.3+** — tested and actively supported
+- [ ] **MIMIC-IV** — not recently tested
+- [ ] **eICU** — not tested
+- [ ] **Other source formats and schemas** — not tested
+
+Code for an untested format may exist in the repository, but it should not be considered supported until it has current test coverage and validation against representative data.
 
 ## Installation
 
@@ -26,7 +37,7 @@ git clone https://github.com/VISTA-Stanford/meds_etl
 cd meds_etl
 uv sync
 
-# With C++ backend for 7x faster processing (Linux/macOS)
+# With C++ backend for faster sorting (Linux/macOS)
 uv sync --extra cpp
 ```
 
@@ -45,7 +56,7 @@ uv run python -m meds_etl.omop \
   --verbose
 ```
 
-On a 128-core Linux server, the C++ backend processes **3 billion events in ~5 minutes** (vs ~40 min with pure Python).
+The C++ backend only accelerates **Stage 2** (external sort of MEDS Unsorted → MEDS). Stage 1 (OMOP → unsorted events) is always Python/Polars.
 
 ### Pure Python Alternative
 
@@ -61,7 +72,7 @@ uv run python -m meds_etl.omop_streaming \
   --verbose
 ```
 
-This uses a two-phase external sort (partition → k-way merge) that stays memory-bounded and can be faster than the C++ backend for very large datasets.
+This uses a two-phase external sort (partition → k-way merge) that stays memory-bounded. Prefer it when you cannot install the C++ backend, or when you need tighter memory control.
 
 ## 📚 Example Configs
 
