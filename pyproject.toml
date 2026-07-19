@@ -55,6 +55,7 @@ meds_etl_sort = "meds_etl.unsorted:sort_main"
 version_file = "src/meds_etl/_version.py"
 
 [tool.isort]
+profile = "black"
 ensure_newline_before_comments = true
 force_grid_wrap = 0
 include_trailing_comma = true
