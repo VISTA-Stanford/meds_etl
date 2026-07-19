@@ -51,6 +51,8 @@ jobs:
 
   test-with-coverage:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -78,6 +80,18 @@ jobs:
     - name: Run tests with coverage
       run: |
         python -m pytest tests/ --cov=meds_etl --cov-report=xml --cov-report=term -v
+
+    - name: Generate coverage badge
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      run: |
+        genbadge coverage -i coverage.xml -o assets/coverage.svg
+
+    - name: Commit coverage badge
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        commit_message: "chore: update coverage badge [skip ci]"
+        file_pattern: assets/coverage.svg
     
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
@@ -105,16 +119,10 @@ jobs:
     
     - name: Install dependencies
       run: |
-        uv pip install --system black isort ruff
-    
-    - name: Check code formatting with black
+        uv pip install --system pre-commit
+
+    # Use the same pinned hooks developers run before committing. This prevents
+    # local/CI formatter-version or argument drift.
+    - name: Run pre-commit checks
       run: |
-        black --check src/ tests/
-    
-    - name: Check import sorting with isort
-      run: |
-        isort --check-only src/ tests/
-    
-    - name: Lint with ruff
-      run: |
-        ruff check src/ tests/
+        pre-commit run --all-files

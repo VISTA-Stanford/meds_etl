@@ -38,6 +38,7 @@ dev = [
   "isort >= 5.13",
   "ruff >= 0.1.0",
   "pre-commit >= 3.0",
+  "genbadge[coverage]>=1.1.3",
 ]
 tests = [
   "pytest >= 9.0",
@@ -54,6 +55,7 @@ meds_etl_sort = "meds_etl.unsorted:sort_main"
 version_file = "src/meds_etl/_version.py"
 
 [tool.isort]
+profile = "black"
 ensure_newline_before_comments = true
 force_grid_wrap = 0
 include_trailing_comma = true
@@ -90,3 +92,11 @@ python_classes = ["Test*"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 testpaths = ["tests"]
+
+# MIMIC is unsupported / not recently tested; keep the badge denominator aligned
+# with OMOP CDM paths that are actively maintained.
+[tool.coverage.run]
+source = ["meds_etl"]
+omit = [
+  "*/meds_etl/mimic/*",
+]
