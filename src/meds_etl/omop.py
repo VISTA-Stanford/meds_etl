@@ -493,6 +493,9 @@ def run_omop_to_meds_etl(
             print(f"   - {f.get('table', 'unknown'):20s} / {f['file']}: {f.get('error', 'Unknown error')}")
             if "traceback" in f and verbose:
                 print(f"     {f['traceback']}")
+        raise RuntimeError(
+            f"OMOP conversion failed for {len(failures)} files; refusing to publish a partial MEDS extract"
+        )
 
     written_files = list(unsorted_dir.glob("*.parquet"))
     print(f"\n💾 Files written to {unsorted_dir}:")
