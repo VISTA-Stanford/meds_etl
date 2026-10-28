@@ -843,7 +843,14 @@ def prescan_concept_ids(
 
     worker_args = list(enumerate(worker_loads))
 
+    # Fallback concepts may never appear in a source column. Retain them when
+    # reducing the vocabulary, or unknown/zero source IDs silently lose their
+    # configured fallback and are dropped downstream as null-code events.
     all_concept_ids: Set[int] = set()
+    for table_config in [*config.get("tables", {}).values(), *config.get("canonical_events", {}).values()]:
+        fallback_id = table_config.get("code_mappings", {}).get("concept_id", {}).get("fallback_concept_id")
+        if fallback_id is not None:
+            all_concept_ids.add(int(fallback_id))
     total_errors: List[str] = []
 
     try:

@@ -13,6 +13,85 @@ from meds_etl.omop_streaming import run_omop_to_meds_streaming
 from tests.fixtures_omop import MINIMAL_CONFIG, write_config, write_minimal_omop
 
 
+@pytest.mark.parametrize("canonical", [False, True])
+def test_fallback_notes_survive_concept_prescan(tmp_path: Path, canonical: bool):
+    """A fallback absent from source IDs must survive vocabulary optimization."""
+    from tests.fixtures_omop import write_concept_omop
+
+    omop_dir = tmp_path / "omop"
+    omop_dir.mkdir()
+    write_concept_omop(omop_dir)
+    note_dir = omop_dir / "note"
+    note_dir.mkdir()
+    texts = ["known class\nfull text", "unknown class é猫", "null class"]
+    pl.DataFrame(
+        {
+            "person_id": [1, 1, 2],
+            "note_id": [10, 11, 12],
+            "note_class_concept_id": [3004410, 0, None],
+            "note_datetime": ["2020-01-01T10:00:00"] * 3,
+            "note_text": texts,
+        }
+    ).with_columns(pl.col("note_datetime").str.to_datetime()).write_parquet(note_dir / "data.parquet")
+    note_config = {
+        "time_start": "@note_datetime",
+        "code": "$omop.lookup:@note_class_concept_id || $omop.lookup:3000963",
+        "text_value": "@note_text",
+        "properties": [{"name": "note_id", "value": "@note_id", "type": "int"}],
+    }
+    config = {
+        "primary_key": "person_id",
+        "vocabulary": {"$omop": {"sources": ["concept"], "standard_only": ["S", "C"]}},
+        "tables": {"note": note_config},
+    }
+    if canonical:
+        config["canonical_events"] = {"note": {"table": "note", **config["tables"].pop("note")}}
+    from meds_etl.config_compiler import compile_config
+    from meds_etl.omop_common import prescan_concept_ids
+
+    used = prescan_concept_ids(omop_dir, compile_config(config), num_workers=1)
+    assert {3004410, 3000963} <= used  # Ensure optimization actually ran.
+    out = tmp_path / "meds"
+    run_omop_to_meds_etl(
+        omop_dir,
+        out,
+        write_config(tmp_path / "config.json", config),
+        num_workers=1,
+        num_shards=2,
+        backend="polars",
+        low_memory=True,
+    )
+    result = pl.read_parquet(str(out / "data/*.parquet")).sort("note_id")
+    assert result["note_id"].to_list() == [10, 11, 12]
+    assert result["text_value"].to_list() == texts
+    assert result["code"].to_list() == ["LOINC/8310-5", "LOINC/8867-4", "LOINC/8867-4"]
+
+
+def test_etl_fails_closed_on_table_error(tmp_path: Path, monkeypatch):
+    import meds_etl.omop as omop
+
+    source = tmp_path / "omop"
+    source.mkdir()
+    write_minimal_omop(source)
+    monkeypatch.setattr(
+        omop,
+        "process_omop_file_worker",
+        lambda task: {"success": False, "file": "data.parquet", "table": "note", "error": "bad mapping"},
+    )
+    output = tmp_path / "output"
+    with pytest.raises(RuntimeError, match="refusing to publish a partial"):
+        run_omop_to_meds_etl(
+            source,
+            output,
+            write_config(tmp_path / "config.json", MINIMAL_CONFIG),
+            num_workers=1,
+            num_shards=1,
+            backend="polars",
+            low_memory=True,
+        )
+    assert not (output / "data").exists()
+
+
 def _assert_meds_output(output_dir: Path, expected_min_rows: int = 1) -> pl.DataFrame:
     data_dir = output_dir / "data"
     assert data_dir.exists(), f"Missing data dir: {data_dir}"
