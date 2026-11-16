@@ -774,6 +774,22 @@ def prescan_worker(args: Tuple) -> Dict[str, Any]:
     }
 
 
+def literal_fallback_concept_ids(config: Dict) -> Set[int]:
+    """Concept ids written as literals in the config (``$omop.lookup:<int>``,
+    ``$omop.resolve:<int>``, ``$omop:<int>`` in a ``||`` chain).
+
+    These never appear in a data column, so the pre-scan cannot discover them
+    and must keep them explicitly.
+    """
+    ids: Set[int] = set()
+    sections = list(config.get("tables", {}).values()) + list(config.get("canonical_events", {}).values())
+    for section in sections:
+        fallback = section.get("code_mappings", {}).get("concept_id", {}).get("fallback_concept_id")
+        if fallback is not None:
+            ids.add(int(fallback))
+    return ids
+
+
 def prescan_concept_ids(
     omop_dir: Path,
     config: Dict,
@@ -881,6 +897,11 @@ def prescan_concept_ids(
         print(f"  ⚠️  WARNING: Pre-scan failed: {e}")
         print("  ⚠️  Continuing without concept optimization (will use full concept table)")
         return set()
+
+    # Only add literals when the scan found something: an empty result means
+    # "don't filter the concept table", and adding literals would change that.
+    if all_concept_ids:
+        all_concept_ids |= literal_fallback_concept_ids(config)
 
     return all_concept_ids
 
