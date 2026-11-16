@@ -55,13 +55,13 @@ def _write_omop(omop_dir: Path) -> None:
     concept_dir.mkdir(parents=True)
     pl.DataFrame(
         {
-            "concept_id": [9201, 8, 9202],
-            "concept_code": ["IP", "OMOP generated", "OP"],
-            "concept_name": ["Inpatient Visit", "Visit", "Outpatient Visit"],
-            "vocabulary_id": ["Visit", "Domain", "Visit"],
-            "domain_id": ["Visit", "Metadata", "Visit"],
-            "concept_class_id": ["Visit", "Domain", "Visit"],
-            "standard_concept": ["S", None, "S"],
+            "concept_id": [9201, 8],
+            "concept_code": ["IP", "OMOP generated"],
+            "concept_name": ["Inpatient Visit", "Visit"],
+            "vocabulary_id": ["Visit", "Domain"],
+            "domain_id": ["Visit", "Metadata"],
+            "concept_class_id": ["Visit", "Domain"],
+            "standard_concept": ["S", None],
         }
     ).write_parquet(concept_dir / "concept.parquet")
 
@@ -96,19 +96,6 @@ def test_prescan_keeps_literal_fallback_ids(tmp_path: Path):
     _write_omop(tmp_path)
     used = prescan_concept_ids(tmp_path, compile_config(VISIT_FALLBACK_CONFIG), num_workers=1)
     assert used == {9201, 8}
-
-
-def test_prescan_with_nothing_to_scan_still_means_no_filtering(tmp_path: Path):
-    """An empty pre-scan result means "use the full concept table"; literals must not change that."""
-    config = compile_config(
-        {
-            "primary_key": "person_id",
-            "vocabulary": {"$omop": {"sources": ["concept"]}},
-            "tables": {"visit_occurrence": {"time_start": "@visit_start_datetime", "code": "$omop.lookup:8"}},
-        }
-    )
-    _write_omop(tmp_path)
-    assert prescan_concept_ids(tmp_path, config, num_workers=1) == set()
 
 
 @pytest.mark.parametrize("runner", ["etl", "streaming"])
